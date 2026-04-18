@@ -145,6 +145,14 @@ impl Config {
         Ok(dir.join("config.toml"))
     }
 
+    pub fn log_path() -> Result<PathBuf> {
+        let dirs = ProjectDirs::from("com", "chestercs", "vibe-dictate")
+            .context("Could not resolve APPDATA directory")?;
+        let dir = dirs.cache_dir();
+        fs::create_dir_all(dir).context("Failed to create cache dir")?;
+        Ok(dir.join("vibe-dictate.log"))
+    }
+
     pub fn load_or_default() -> Result<Self> {
         let path = Self::config_path()?;
         if !path.exists() {

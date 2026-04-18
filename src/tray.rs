@@ -17,6 +17,8 @@ const ID_RELOAD: &str = "vd:reload";
 const ID_AUTOSTART: &str = "vd:autostart";
 const ID_OUT_CLIPBOARD: &str = "vd:out:clipboard";
 const ID_OUT_SENDINPUT: &str = "vd:out:sendinput";
+const ID_OPEN_LOG: &str = "vd:open:log";
+const ID_OPEN_CONFIG: &str = "vd:open:config";
 const PREFIX_HOTKEY: &str = "vd:hotkey:";
 const PREFIX_MIC: &str = "vd:mic:";
 const ID_MIC_DEFAULT: &str = "vd:mic:__default__";
@@ -119,10 +121,29 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
 
     menu.append(&PredefinedMenuItem::separator())?;
 
+    let open_log = MenuItem::with_id(MenuId::new(ID_OPEN_LOG), "Open log file", true, None);
+    let open_config = MenuItem::with_id(MenuId::new(ID_OPEN_CONFIG), "Open config file", true, None);
+    menu.append(&open_log)?;
+    menu.append(&open_config)?;
+
+    menu.append(&PredefinedMenuItem::separator())?;
+
     let quit = MenuItem::with_id(MenuId::new(ID_QUIT), "Quit", true, None);
     menu.append(&quit)?;
 
     Ok(menu)
+}
+
+fn open_path_in_default_app(path: &std::path::Path) -> Result<()> {
+    // notepad.exe is universally present on Windows and handles both .log and
+    // .toml plaintext files. We deliberately avoid `cmd /C start "" "<path>"`
+    // because the empty title-quoting trick is fragile under non-console apps
+    // (cmd exit code 1 in practice on windowed builds).
+    std::process::Command::new("notepad.exe")
+        .arg(path)
+        .spawn()
+        .with_context(|| format!("spawn notepad for {}", path.display()))?;
+    Ok(())
 }
 
 pub fn rebuild_menu(state: &TrayState, cfg: &Config) -> Result<()> {
@@ -180,6 +201,16 @@ pub fn handle_menu_event(
         c.save()?;
         log::info!("Output mode: SendInput");
         outcome.menu_dirty = true;
+    } else if id == ID_OPEN_LOG {
+        let p = Config::log_path()?;
+        if let Err(e) = open_path_in_default_app(&p) {
+            log::error!("open log failed: {e:#}");
+        }
+    } else if id == ID_OPEN_CONFIG {
+        let p = Config::config_path()?;
+        if let Err(e) = open_path_in_default_app(&p) {
+            log::error!("open config failed: {e:#}");
+        }
     } else if let Some(rest) = id.strip_prefix(PREFIX_HOTKEY) {
         let mut c = cfg.lock().unwrap();
         if !c.hotkey.binding.eq_ignore_ascii_case(rest) {

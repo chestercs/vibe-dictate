@@ -50,8 +50,11 @@ impl HotkeyState {
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    init_logger();
     log::info!("vibe-dictate v{} starting", env!("CARGO_PKG_VERSION"));
+    if let Ok(p) = Config::log_path() {
+        log::info!("Log file: {}", p.display());
+    }
 
     let cfg = Arc::new(Mutex::new(Config::load_or_default()?));
 
@@ -217,6 +220,13 @@ fn send_and_inject(wav: Vec<u8>, cfg: Arc<Mutex<Config>>) -> Result<()> {
         log::warn!("Empty transcription returned");
         return Ok(());
     }
+    // Filter out single non-speech meta tags like "[Music]", "[Noise]", "[Silence]".
+    // VibeVoice ASR emits these when no speech is detected — pasting them into
+    // the focused window is never what the user wants.
+    if is_meta_only(&out) {
+        log::warn!("Non-speech transcription '{}', skipping paste", out);
+        return Ok(());
+    }
     if output_cfg.trailing_space {
         out.push(' ');
     }
@@ -227,6 +237,47 @@ fn send_and_inject(wav: Vec<u8>, cfg: Arc<Mutex<Config>>) -> Result<()> {
         OutputMode::Sendinput => injector::send_input_text(&out)?,
     }
     Ok(())
+}
+
+/// VibeVoice ASR returns single-word bracketed meta tags ("[Music]", "[Noise]",
+/// "[Silence]") when no actual speech is detected. We treat those as silence
+/// rather than pasting them into the user's focused window.
+fn is_meta_only(text: &str) -> bool {
+    let t = text.trim();
+    let inner = match (t.strip_prefix('['), t.strip_suffix(']')) {
+        (Some(_), Some(_)) if t.len() >= 2 => &t[1..t.len() - 1],
+        _ => return false,
+    };
+    !inner.is_empty()
+        && inner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn init_logger() {
+    let env = env_logger::Env::default().default_filter_or("info");
+    let mut builder = env_logger::Builder::from_env(env);
+
+    // In windowed builds there is no console, so stderr is dropped. Always
+    // try to also tee logs into a rotating-on-startup file in the cache dir.
+    if let Ok(path) = Config::log_path() {
+        // Truncate on each start so the file never grows unbounded; the user
+        // can keep an external tail open if they want history.
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path);
+        match file {
+            Ok(f) => {
+                builder.target(env_logger::Target::Pipe(Box::new(f)));
+            }
+            Err(e) => {
+                eprintln!("vibe-dictate: cannot open log file {}: {e:#}", path.display());
+            }
+        }
+    }
+    builder.init();
 }
 
 fn parse_hotkey(s: &str) -> Result<HotKey> {

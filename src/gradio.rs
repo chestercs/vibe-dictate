@@ -40,13 +40,22 @@ impl GradioClient {
         max_new_tokens: u32,
         language_hint: &str,
     ) -> Result<String> {
+        log::info!(
+            "Gradio: uploading WAV ({} bytes) to {}",
+            wav.len(),
+            self.base_url
+        );
         let file_path = self.upload(wav)?;
-        log::debug!("Uploaded file path: {}", file_path);
+        log::info!("Gradio: uploaded as '{}'", file_path);
 
         let event_id = self.call(&file_path, context_info, max_new_tokens, language_hint)?;
-        log::debug!("Event id: {}", event_id);
+        log::info!(
+            "Gradio: call queued, event_id={}, polling…",
+            event_id
+        );
 
         let text = self.poll_result(&event_id)?;
+        log::info!("Gradio: poll complete ({} chars)", text.len());
         Ok(text)
     }
 
@@ -80,6 +89,19 @@ impl GradioClient {
         language_hint: &str,
     ) -> Result<String> {
         let url = format!("{}/gradio_api/call/{}", self.base_url, self.function);
+
+        // VibeVoice ASR demo's transcribe_audio takes 10 positional inputs in
+        // this exact order — see /gradio_api/info on the running server. The
+        // first is the FileData; the next three (path/start/end) are only for
+        // long-audio segmentation and stay empty in push-to-talk usage.
+        // language_hint isn't a first-class parameter, so we fold it into
+        // context_info as a hint sentence when context_info is otherwise empty.
+        let effective_context = if context_info.is_empty() && !language_hint.is_empty() {
+            format!("Spoken language: {}.", language_hint)
+        } else {
+            context_info.to_string()
+        };
+
         let body = json!({
             "data": [
                 {
@@ -89,9 +111,15 @@ impl GradioClient {
                     "mime_type": "audio/wav",
                     "meta": { "_type": "gradio.FileData" }
                 },
-                context_info,
-                max_new_tokens,
-                language_hint
+                "",                  // audio_path_input
+                "",                  // start_time_input
+                "",                  // end_time_input
+                max_new_tokens,      // max_new_tokens
+                0.0,                 // temperature
+                1.0,                 // top_p
+                false,               // do_sample
+                1.0,                 // repetition_penalty
+                effective_context    // context_info
             ]
         });
 
@@ -160,19 +188,61 @@ impl GradioClient {
 }
 
 fn extract_text(v: &Value) -> Result<String> {
-    // Gradio "complete" data is typically a JSON array of outputs.
-    // transcribe_audio returns a single Textbox string.
-    match v {
-        Value::Array(arr) => {
-            let first = arr
-                .first()
-                .ok_or_else(|| anyhow!("gradio complete array empty"))?;
-            match first {
-                Value::String(s) => Ok(s.clone()),
-                other => Ok(other.to_string()),
-            }
-        }
-        Value::String(s) => Ok(s.clone()),
-        other => Ok(other.to_string()),
+    // VibeVoice ASR returns two outputs in `complete`: [raw_text, segments_html].
+    // The raw_text is a human-formatted block ending in a JSON segments array:
+    //   --- ✅ Raw Output ---
+    //   📥 Input: ... tokens
+    //   📤 Output: ... tokens | ⏱️ Time: 27.04s
+    //   ---
+    //   assistant
+    //   [{"Start":0.0,"End":2.67,"Speaker":0,"Content":"Hello, hello, see ya."}]
+    let raw = match v {
+        Value::Array(arr) => arr
+            .first()
+            .ok_or_else(|| anyhow!("gradio complete array empty"))?,
+        other => other,
+    };
+    let raw_str = match raw {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+
+    if let Some(joined) = parse_segments(&raw_str) {
+        return Ok(joined);
+    }
+
+    log::warn!(
+        "Could not extract segment Contents from raw output, returning as-is ({} chars)",
+        raw_str.len()
+    );
+    Ok(raw_str)
+}
+
+#[derive(Debug, Deserialize)]
+struct Segment {
+    #[serde(rename = "Content")]
+    content: String,
+}
+
+fn parse_segments(raw: &str) -> Option<String> {
+    // The segments array always opens with `[{` (array of objects). Naively
+    // searching for the last `[` is wrong because Content values themselves
+    // can contain bracketed meta-tags like "[Music]". Anchor on `[{` and the
+    // matching trailing `}]`.
+    let start = raw.find("[{")?;
+    let end = raw[start..].rfind("}]")? + start + 2;
+    let json_slice = raw[start..end].trim();
+
+    let segs: Vec<Segment> = serde_json::from_str(json_slice).ok()?;
+    let joined = segs
+        .iter()
+        .map(|s| s.content.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
     }
 }
