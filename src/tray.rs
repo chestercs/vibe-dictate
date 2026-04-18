@@ -159,6 +159,22 @@ pub fn is_quit(e: &MenuEvent) -> bool {
     e.id().0 == ID_QUIT
 }
 
+pub fn set_recording(state: &TrayState, recording: bool, binding: &str) -> Result<()> {
+    let icon = if recording {
+        indicator_icon(220, 50, 50)?
+    } else {
+        indicator_icon(30, 120, 220)?
+    };
+    state.icon.set_icon(Some(icon)).context("tray set_icon")?;
+    let tip = if recording {
+        "vibe-dictate — recording… release to send".to_string()
+    } else {
+        format!("vibe-dictate — hotkey: {}", binding)
+    };
+    let _ = state.icon.set_tooltip(Some(tip));
+    Ok(())
+}
+
 /// Result of handling a menu event so main can react (rebind hotkey, rebuild menu).
 #[derive(Debug, Default)]
 pub struct MenuOutcome {
@@ -241,8 +257,13 @@ pub fn handle_menu_event(
 }
 
 fn fallback_icon() -> Result<Icon> {
-    // 32x32 solid blue-ish square with a white dot center — good enough for v0.1.
-    // Real icon gets embedded via build.rs / winres when assets/icon.ico exists.
+    indicator_icon(30, 120, 220)
+}
+
+fn indicator_icon(r: u8, g: u8, b: u8) -> Result<Icon> {
+    // 32x32 coloured square with a white dot center. Idle = blue, recording =
+    // red, chosen by the caller. Real branded icon gets embedded via build.rs /
+    // winres when assets/icon.ico exists.
     const SIZE: u32 = 32;
     let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
     for y in 0..SIZE {
@@ -253,7 +274,7 @@ fn fallback_icon() -> Result<Icon> {
             if dist2 < 16 {
                 rgba.extend_from_slice(&[255, 255, 255, 255]);
             } else {
-                rgba.extend_from_slice(&[30, 120, 220, 255]);
+                rgba.extend_from_slice(&[r, g, b, 255]);
             }
         }
     }

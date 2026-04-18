@@ -125,6 +125,7 @@ fn main() -> Result<()> {
                                         log::info!("Recording started");
                                         *slot = Some(r);
                                         *press_time_loop.lock().unwrap() = Some(Instant::now());
+                                        let _ = tray::set_recording(&tray_keep_alive, true, "");
                                     }
                                     Err(e) => log::error!("Failed to start recording: {e:#}"),
                                 }
@@ -137,6 +138,8 @@ fn main() -> Result<()> {
                                 let duration = started
                                     .map(|t| t.elapsed())
                                     .unwrap_or_else(|| Duration::from_millis(0));
+                                let binding = cfg_loop.lock().unwrap().hotkey.binding.clone();
+                                let _ = tray::set_recording(&tray_keep_alive, false, &binding);
                                 if duration < Duration::from_millis(150) {
                                     log::info!(
                                         "Recording too short ({}ms), discarded",
