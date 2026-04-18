@@ -26,6 +26,13 @@ pub struct GradioConfig {
     pub url: String,
     pub function: String,
     pub api_token: String,
+    /// Absolute path to a PEM-encoded CA certificate (or bundle) that
+    /// reqwest should trust in addition to the system roots. Leave empty
+    /// for localhost / public-CA deployments; set this when pointing the
+    /// client at a remote VibeVoice endpoint behind a self-signed cert
+    /// or a private CA (e.g. Tailscale funnel, internal proxy).
+    #[serde(default)]
+    pub extra_ca_cert: String,
 }
 
 impl Default for GradioConfig {
@@ -34,6 +41,7 @@ impl Default for GradioConfig {
             url: "http://localhost:7860".to_string(),
             function: "transcribe_audio".to_string(),
             api_token: String::new(),
+            extra_ca_cert: String::new(),
         }
     }
 }

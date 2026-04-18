@@ -22,9 +22,20 @@ struct CallResponse {
 
 impl GradioClient {
     pub fn new(cfg: &GradioConfig) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(300))
-            .build()?;
+        let mut builder = Client::builder().timeout(Duration::from_secs(300));
+        let ca_path = cfg.extra_ca_cert.trim();
+        if !ca_path.is_empty() {
+            // Remote deployments typically use self-signed or internal CAs.
+            // We read the PEM once per client; reqwest accepts both single
+            // certs and concatenated bundles.
+            let pem = std::fs::read(ca_path)
+                .with_context(|| format!("read extra_ca_cert from '{}'", ca_path))?;
+            let cert = reqwest::Certificate::from_pem(&pem)
+                .with_context(|| format!("parse extra_ca_cert PEM at '{}'", ca_path))?;
+            builder = builder.add_root_certificate(cert);
+            log::info!("Gradio client: loaded extra CA from '{}'", ca_path);
+        }
+        let client = builder.build().context("build reqwest client")?;
         Ok(Self {
             base_url: cfg.url.trim_end_matches('/').to_string(),
             function: cfg.function.clone(),

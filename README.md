@@ -29,11 +29,35 @@ Dupla klikk az `.exe`-re. Tray-be megy, megkeresed az ikonját.
 
 Első indításkor létrejön: `%APPDATA%\vibe-dictate\config.toml` — itt állíthatod:
 - `gradio.url` — default `http://localhost:7860`
-- `hotkey.binding` — default `RightAlt+Space`
+- `gradio.api_token` — üres lokálhoz; távoli szervernél ide jön a Bearer
+- `gradio.extra_ca_cert` — üres lokálhoz; self-signed / internal CA esetén
+  abszolút path a PEM fájlhoz (cert vagy bundle, a rendszer root store
+  mellé töltődik be)
+- `hotkey.binding` — default `F8`
 - `output.mode` — `clipboard` (default) vagy `sendinput`
 - `audio.mic_device` — üres = default device
+- `stt.language_hint` — default `Hungarian`, a modelbe mint preferált
+  nyelv-prompt megy be
+- `stt.context_info` — default "speaker is Hungarian, mixes English
+  technical terms" — szabad szöveg, tetszőlegesen szigorítható
 
 Config módosítás után: tray menü → "Reload config".
+
+## Remote backend
+
+Ha a VibeVoice Gradio egy szerveren fut (pl. az ASUS GB10 DGX Spark-en,
+lásd `docker-compose-vibevoice-asr-gb10.yml`):
+
+```toml
+[gradio]
+url = "https://vibevoice.example.internal"
+api_token = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+extra_ca_cert = "C:/Users/you/certs/internal-ca.pem"
+```
+
+A Bearer tokent a reqwest minden /upload, /call, /poll kéréshez beteszi
+(`Authorization: Bearer <token>`). A CA fájl egy vagy több PEM-kódolt
+cert lehet — reqwest rustls-sel bundlekezeli.
 
 ## Funkciók v0.1
 
