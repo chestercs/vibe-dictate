@@ -15,6 +15,10 @@ const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(400);
 /// ack, not a lingering error state.
 const CANCEL_FLASH_DURATION: Duration = Duration::from_millis(500);
 
+/// Max wait-time for the user to press a key in the capture popup. If they
+/// walk away, the capture auto-cancels and the prior hotkey is restored.
+const HOTKEY_CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
+
 use anyhow::{anyhow, Context, Result};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
@@ -27,7 +31,9 @@ mod audio;
 mod autostart;
 mod config;
 mod gradio;
+mod hotkey_capture;
 mod injector;
+mod mouse_hook;
 mod singleton;
 mod tray;
 
@@ -41,26 +47,54 @@ enum AppEvent {
     Quit,
 }
 
-struct HotkeyState {
-    manager: GlobalHotKeyManager,
-    current: HotKey,
+/// Unified binding owner: routes a binding string either to the keyboard
+/// global-hotkey manager or to the low-level mouse hook, so the rest of
+/// the app doesn't have to branch on "is it a mouse binding?" everywhere.
+///
+/// Exactly one of (`kb_current` active, `mouse_shared` Some) is ever set.
+/// `disable()` clears both, for the capture-dialog pause.
+struct BindingManager {
+    kb_manager: GlobalHotKeyManager,
+    kb_current: Option<HotKey>,
+    mouse_shared: Arc<Mutex<Option<mouse_hook::MouseBinding>>>,
 }
 
-impl HotkeyState {
-    fn rebind(&mut self, new_binding: &str) -> Result<()> {
-        let new_hk = parse_hotkey(new_binding)
-            .with_context(|| format!("parse hotkey '{}'", new_binding))?;
-        self.manager
-            .unregister(self.current)
-            .context("unregister previous hotkey")?;
-        if let Err(e) = self.manager.register(new_hk) {
-            // Try to restore the previous binding so the app stays usable.
-            let _ = self.manager.register(self.current);
-            return Err(anyhow!("register new hotkey '{}' failed: {:#}", new_binding, e));
+impl BindingManager {
+    fn new(mouse_shared: Arc<Mutex<Option<mouse_hook::MouseBinding>>>) -> Result<Self> {
+        let kb_manager = GlobalHotKeyManager::new().context("hotkey manager init")?;
+        Ok(Self {
+            kb_manager,
+            kb_current: None,
+            mouse_shared,
+        })
+    }
+
+    fn apply(&mut self, binding: &str) -> Result<()> {
+        // Fully tear down any previous binding first — saves us from
+        // partial-state bugs when a user flips between kb and mouse.
+        self.disable();
+        if let Some(mb) = mouse_hook::parse_mouse_binding(binding) {
+            *self.mouse_shared.lock().unwrap() = Some(mb);
+            log::info!("Binding active (mouse): {}", binding);
+        } else {
+            let hk = parse_hotkey(binding)
+                .with_context(|| format!("parse hotkey '{}'", binding))?;
+            self.kb_manager
+                .register(hk)
+                .with_context(|| format!("register hotkey '{}'", binding))?;
+            self.kb_current = Some(hk);
+            log::info!("Binding active (keyboard): {}", binding);
         }
-        self.current = new_hk;
-        log::info!("Hotkey rebound to {}", new_binding);
         Ok(())
+    }
+
+    /// Pause both routes. Used while the capture popup is open so neither
+    /// the kb manager nor the mouse hook fires recording events.
+    fn disable(&mut self) {
+        if let Some(hk) = self.kb_current.take() {
+            let _ = self.kb_manager.unregister(hk);
+        }
+        *self.mouse_shared.lock().unwrap() = None;
     }
 }
 
@@ -96,22 +130,18 @@ fn main() -> Result<()> {
     // Tray icon + menu
     let tray_state = tray::build(&cfg.lock().unwrap())?;
 
-    // Global hotkey — manager + currently registered HotKey kept together so the
-    // tray menu callback can rebind on the fly.
-    let hotkey_manager = GlobalHotKeyManager::new().context("hotkey manager init")?;
-    let initial_hotkey = parse_hotkey(&cfg.lock().unwrap().hotkey.binding)
-        .context("parse hotkey binding")?;
-    hotkey_manager
-        .register(initial_hotkey)
-        .context("register global hotkey")?;
-    log::info!(
-        "Registered hotkey: {}",
-        cfg.lock().unwrap().hotkey.binding
-    );
-    let hotkey_state = HotkeyState {
-        manager: hotkey_manager,
-        current: initial_hotkey,
-    };
+    // Mouse hook — runs as a dedicated thread with its own message pump.
+    // Always active, but only fires MouseEvent when the current binding
+    // matches a mouse button; otherwise stays silent.
+    let mouse_handle = mouse_hook::start();
+
+    // Binding router — covers both keyboard (via global-hotkey) and mouse
+    // (via the hook) paths behind a single `apply(binding)` entrypoint.
+    let mut binding_manager = BindingManager::new(mouse_handle.binding.clone())?;
+    let initial_binding = cfg.lock().unwrap().hotkey.binding.clone();
+    binding_manager
+        .apply(&initial_binding)
+        .with_context(|| format!("apply initial binding '{}'", initial_binding))?;
 
     // Recording state
     let recorder: Arc<Mutex<Option<audio::Recorder>>> = Arc::new(Mutex::new(None));
@@ -143,10 +173,19 @@ fn main() -> Result<()> {
     let flash_until_loop = flash_until.clone();
     let last_status_loop = last_status.clone();
 
-    // Keep tray + hotkey state alive for the event loop. The closure takes
-    // ownership; HotkeyState is mutated via &mut self when rebinding.
+    // Keep tray + binding + mouse-hook state alive for the event loop.
     let tray_keep_alive = tray_state;
-    let mut hotkey_state = hotkey_state;
+    let mouse_rx = mouse_handle.rx;
+
+    // In-flight hotkey capture. When a menu event fires "Rebind…" we
+    // disable the current binding, spawn the capture worker, and stash both
+    // the channel and the previous binding string here. Each tick polls —
+    // on success we save + re-apply, on cancel we restore the previous.
+    struct PendingCapture {
+        handle: hotkey_capture::CaptureHandle,
+        previous: String,
+    }
+    let mut pending_capture: Option<PendingCapture> = None;
 
     // Pump hotkey/menu events periodically
     let proxy = event_loop.create_proxy();
@@ -205,10 +244,31 @@ fn main() -> Result<()> {
                     }
                 }
 
-                // Drain hotkey events
+                // Collapse keyboard + mouse events into a single stream of
+                // Press/Release actions so the downstream recording logic
+                // doesn't care which input device triggered the user.
+                #[derive(Copy, Clone)]
+                enum PushAction {
+                    Press,
+                    Release,
+                }
+                let mut actions: Vec<PushAction> = Vec::new();
                 while let Ok(hk_evt) = GlobalHotKeyEvent::receiver().try_recv() {
-                    match hk_evt.state {
-                        HotKeyState::Pressed => {
+                    actions.push(match hk_evt.state {
+                        HotKeyState::Pressed => PushAction::Press,
+                        HotKeyState::Released => PushAction::Release,
+                    });
+                }
+                while let Ok(m_evt) = mouse_rx.try_recv() {
+                    actions.push(match m_evt {
+                        mouse_hook::MouseEvent::Pressed => PushAction::Press,
+                        mouse_hook::MouseEvent::Released => PushAction::Release,
+                    });
+                }
+
+                for action in actions {
+                    match action {
+                        PushAction::Press => {
                             let now = Instant::now();
                             let prev = last_press_at_loop.lock().unwrap().replace(now);
                             let is_double_tap = prev
@@ -244,8 +304,12 @@ fn main() -> Result<()> {
                                 let mut slot = recorder_loop.lock().unwrap();
                                 if slot.is_none() {
                                     // New session — clear any stale cancel flag from a
-                                    // prior aborted run.
+                                    // prior aborted run, and snap the tray off any
+                                    // leftover red flash so the icon goes straight
+                                    // from red → green when the user re-presses
+                                    // shortly after a cancel.
                                     cancel_flag_loop.store(false, Ordering::SeqCst);
+                                    *flash_until_loop.lock().unwrap() = None;
                                     let audio_cfg = cfg_loop.lock().unwrap().audio.clone();
                                     match audio::Recorder::start(&audio_cfg) {
                                         Ok(r) => {
@@ -261,7 +325,7 @@ fn main() -> Result<()> {
                                 }
                             }
                         }
-                        HotKeyState::Released => {
+                        PushAction::Release => {
                             let rec = recorder_loop.lock().unwrap().take();
                             let started = press_time_loop.lock().unwrap().take();
                             if let Some(r) = rec {
@@ -318,8 +382,26 @@ fn main() -> Result<()> {
                         Ok(outcome) => {
                             if outcome.hotkey_changed {
                                 let new_binding = cfg_loop.lock().unwrap().hotkey.binding.clone();
-                                if let Err(e) = hotkey_state.rebind(&new_binding) {
-                                    log::error!("hotkey rebind failed: {e:#}");
+                                if let Err(e) = binding_manager.apply(&new_binding) {
+                                    log::error!("apply new binding failed: {e:#}");
+                                }
+                            }
+                            if outcome.request_capture {
+                                if pending_capture.is_some() {
+                                    log::info!(
+                                        "Hotkey capture already in progress, ignoring duplicate request"
+                                    );
+                                } else {
+                                    let previous =
+                                        cfg_loop.lock().unwrap().hotkey.binding.clone();
+                                    binding_manager.disable();
+                                    log::info!("Opening hotkey capture popup");
+                                    pending_capture = Some(PendingCapture {
+                                        handle: hotkey_capture::capture_hotkey_async(
+                                            HOTKEY_CAPTURE_TIMEOUT,
+                                        ),
+                                        previous,
+                                    });
                                 }
                             }
                             if outcome.menu_dirty {
@@ -333,6 +415,62 @@ fn main() -> Result<()> {
                     }
                     if tray::is_quit(&me) {
                         *control_flow = ControlFlow::Exit;
+                    }
+                }
+
+                // Poll any in-flight hotkey capture. try_recv is non-blocking
+                // and Disconnected means the worker panicked / exited without
+                // sending — treat that as cancel + restore.
+                if let Some(pending) = pending_capture.as_ref() {
+                    match pending.handle.rx.try_recv() {
+                        Ok(Ok(Some(new_binding))) => {
+                            log::info!("Hotkey capture returned: {}", new_binding);
+                            if let Err(e) = binding_manager.apply(&new_binding) {
+                                log::error!("apply captured binding failed: {e:#}");
+                                // Fall back to previous so the app isn't left silent.
+                                if let Err(e2) = binding_manager.apply(&pending.previous) {
+                                    log::error!("restore previous binding failed: {e2:#}");
+                                }
+                            } else {
+                                let save_res = {
+                                    let mut c = cfg_loop.lock().unwrap();
+                                    c.hotkey.binding = new_binding.clone();
+                                    c.save()
+                                };
+                                if let Err(e) = save_res {
+                                    log::error!("save config after capture failed: {e:#}");
+                                }
+                            }
+                            let snapshot = cfg_loop.lock().unwrap().clone();
+                            if let Err(e) = tray::rebuild_menu(&tray_keep_alive, &snapshot) {
+                                log::error!("tray menu rebuild failed after capture: {e:#}");
+                            }
+                            pending_capture = None;
+                        }
+                        Ok(Ok(None)) => {
+                            log::info!("Hotkey capture cancelled, restoring previous binding");
+                            if let Err(e) = binding_manager.apply(&pending.previous) {
+                                log::error!("restore previous binding failed: {e:#}");
+                            }
+                            pending_capture = None;
+                        }
+                        Ok(Err(e)) => {
+                            log::error!("Hotkey capture errored: {e:#}");
+                            if let Err(e2) = binding_manager.apply(&pending.previous) {
+                                log::error!("restore previous binding failed: {e2:#}");
+                            }
+                            pending_capture = None;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            log::error!(
+                                "Hotkey capture worker disconnected without sending a result"
+                            );
+                            if let Err(e) = binding_manager.apply(&pending.previous) {
+                                log::error!("restore previous binding failed: {e:#}");
+                            }
+                            pending_capture = None;
+                        }
                     }
                 }
             }

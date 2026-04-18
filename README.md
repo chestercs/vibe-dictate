@@ -33,7 +33,11 @@ Első indításkor létrejön: `%APPDATA%\vibe-dictate\config.toml` — itt áll
 - `gradio.extra_ca_cert` — üres lokálhoz; self-signed / internal CA esetén
   abszolút path a PEM fájlhoz (cert vagy bundle, a rendszer root store
   mellé töltődik be)
-- `hotkey.binding` — default `F8`
+- `hotkey.binding` — default `F8`. Elfogadott értékek:
+  - billentyű: `F1`..`F12`, `A`..`Z`, `0`..`9`, `Pause`, `ScrollLock`
+  - egér: `Mouse3` (middle), `Mouse4` (XButton1 / back), `Mouse5` (XButton2 / forward)
+  - modifierek: `Ctrl+`, `Shift+`, `Alt+` (pl. `Shift+Mouse4`)
+  - (A `Rebind…` tray menüponttal Win32 popup is elfogadja bármelyiket.)
 - `output.mode` — `clipboard` (default) vagy `sendinput`
 - `audio.mic_device` — üres = default device
 - `stt.language_hint` — default `Hungarian`, a modelbe mint preferált
@@ -66,8 +70,9 @@ cert lehet — reqwest rustls-sel bundlekezeli.
 - [x] Mic capture (WASAPI, cpal)
 - [x] Gradio HTTP: upload + call + SSE result
 - [x] Clipboard + Ctrl+V output
+- [x] Hotkey átkonfigurálás UI-ból (tray → Hotkey → Rebind…)
+- [x] Mouse3/4/5 push-to-talk (Win32 WH_MOUSE_LL hook)
+- [x] Autostart toggle (tray menü)
+- [x] Mic picker (tray menü)
 - [ ] SendInput output (config-ban választható, de v0.1-ben clipboard a default)
-- [ ] Autostart toggle
-- [ ] Mic picker tray menüben
-- [ ] Hotkey átkonfigurálás UI-ból
 - [ ] Settings ablak

@@ -19,6 +19,7 @@ const ID_OUT_CLIPBOARD: &str = "vd:out:clipboard";
 const ID_OUT_SENDINPUT: &str = "vd:out:sendinput";
 const ID_OPEN_LOG: &str = "vd:open:log";
 const ID_OPEN_CONFIG: &str = "vd:open:config";
+const ID_HOTKEY_CAPTURE: &str = "vd:hotkey:__capture__";
 const PREFIX_HOTKEY: &str = "vd:hotkey:";
 const PREFIX_MIC: &str = "vd:mic:";
 const ID_MIC_DEFAULT: &str = "vd:mic:__default__";
@@ -69,7 +70,11 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
 
     // Hotkey submenu — F-keys + Pause/ScrollLock; Alt-based bindings intentionally
     // omitted (they collide with Windows app menus / AltGr stuck-key issues).
+    // "Rebind…" opens a pure-Win32 capture popup that accepts any key + modifiers.
     let hotkey_sub = Submenu::new("Hotkey", true);
+    let current_matches_preset = HOTKEY_OPTIONS
+        .iter()
+        .any(|opt| cfg.hotkey.binding.eq_ignore_ascii_case(opt));
     for opt in HOTKEY_OPTIONS {
         let id = MenuId::new(format!("{PREFIX_HOTKEY}{opt}"));
         let item = CheckMenuItem::with_id(
@@ -81,6 +86,23 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
         );
         hotkey_sub.append(&item)?;
     }
+    hotkey_sub.append(&PredefinedMenuItem::separator())?;
+    // When the active binding isn't in the preset list (because the user
+    // captured a custom combo), we show it as a checked but disabled entry
+    // so the tray makes it obvious what's active without letting the user
+    // re-click an already-active combo.
+    if !current_matches_preset && !cfg.hotkey.binding.is_empty() {
+        let label = format!("Custom: {}", cfg.hotkey.binding);
+        let current = CheckMenuItem::new(label, false, true, None);
+        hotkey_sub.append(&current)?;
+    }
+    let rebind = MenuItem::with_id(
+        MenuId::new(ID_HOTKEY_CAPTURE),
+        "Rebind…",
+        true,
+        None,
+    );
+    hotkey_sub.append(&rebind)?;
     menu.append(&hotkey_sub)?;
 
     // Microphone submenu — default + every enumerated input device.
@@ -208,10 +230,14 @@ pub fn set_cancel_flash(state: &TrayState) -> Result<()> {
 }
 
 /// Result of handling a menu event so main can react (rebind hotkey, rebuild menu).
+/// `request_capture` tells main to pop the Win32 capture dialog — handling that
+/// can't live inside `handle_menu_event` because the dialog pumps its own
+/// messages on a worker thread and needs a channel back to the event loop.
 #[derive(Debug, Default)]
 pub struct MenuOutcome {
     pub hotkey_changed: bool,
     pub menu_dirty: bool,
+    pub request_capture: bool,
 }
 
 pub fn handle_menu_event(
@@ -259,6 +285,8 @@ pub fn handle_menu_event(
         if let Err(e) = open_path_in_default_app(&p) {
             log::error!("open config failed: {e:#}");
         }
+    } else if id == ID_HOTKEY_CAPTURE {
+        outcome.request_capture = true;
     } else if let Some(rest) = id.strip_prefix(PREFIX_HOTKEY) {
         let mut c = cfg.lock().unwrap();
         if !c.hotkey.binding.eq_ignore_ascii_case(rest) {
