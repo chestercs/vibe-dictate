@@ -28,6 +28,7 @@ mod autostart;
 mod config;
 mod gradio;
 mod injector;
+mod singleton;
 mod tray;
 
 use config::{Config, OutputMode};
@@ -35,6 +36,9 @@ use config::{Config, OutputMode};
 #[derive(Debug, Clone)]
 enum AppEvent {
     Tick,
+    /// Sent by the singleton listener when a newer instance asks us to
+    /// make way; the event loop should flip ControlFlow::Exit on receipt.
+    Quit,
 }
 
 struct HotkeyState {
@@ -78,6 +82,16 @@ fn main() -> Result<()> {
     }
 
     let event_loop = EventLoopBuilder::<AppEvent>::with_user_event().build();
+
+    // Single-instance lock — if another vibe-dictate.exe is running, ask it
+    // to quit so we can take its place. The listener thread fires Quit
+    // through the event loop proxy when a *future* instance (after us)
+    // asks the same of us.
+    let quit_proxy = event_loop.create_proxy();
+    singleton::acquire_or_replace(move || {
+        let _ = quit_proxy.send_event(AppEvent::Quit);
+    })
+    .context("singleton acquire")?;
 
     // Tray icon + menu
     let tray_state = tray::build(&cfg.lock().unwrap())?;
@@ -145,6 +159,9 @@ fn main() -> Result<()> {
         *control_flow = ControlFlow::Wait;
 
         match event {
+            tao::event::Event::UserEvent(AppEvent::Quit) => {
+                *control_flow = ControlFlow::Exit;
+            }
             tao::event::Event::UserEvent(AppEvent::Tick) => {
                 // Reconcile tray icon to the single source of truth:
                 //   flash_until active → CancelFlash (red)
