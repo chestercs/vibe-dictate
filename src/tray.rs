@@ -23,6 +23,52 @@ const ID_HOTKEY_CAPTURE: &str = "vd:hotkey:__capture__";
 const PREFIX_HOTKEY: &str = "vd:hotkey:";
 const PREFIX_MIC: &str = "vd:mic:";
 const ID_MIC_DEFAULT: &str = "vd:mic:__default__";
+const PREFIX_LANG: &str = "vd:lang:";
+const ID_LANG_CUSTOM: &str = "vd:lang:__custom__";
+const PREFIX_MAXTOK: &str = "vd:maxtok:";
+const ID_CTX_EDIT: &str = "vd:stt:ctx";
+const ID_GR_URL: &str = "vd:gr:url";
+const ID_GR_TOKEN: &str = "vd:gr:token";
+const ID_GR_CA: &str = "vd:gr:ca";
+
+/// Language presets shown as rubber-stamp options in the tray. Anything else
+/// goes via the Custom… text-input dialog. Order mirrors VibeVoice-ASR's
+/// training-data distribution (Hungarian first because that's our user).
+pub const LANGUAGE_OPTIONS: &[&str] = &[
+    "Hungarian",
+    "English",
+    "German",
+    "French",
+    "Spanish",
+    "Italian",
+    "Portuguese",
+    "Polish",
+    "Dutch",
+    "Japanese",
+    "Korean",
+    "Chinese",
+];
+
+/// Token-budget presets. Labels include the rough audio length at the
+/// model's ~1600 tokens-per-minute rate so the user doesn't have to guess.
+pub const MAXTOK_OPTIONS: &[(&str, u32)] = &[
+    ("4096 (~2.5 min)", 4096),
+    ("8192 (~5 min)", 8192),
+    ("16384 (~10 min)", 16384),
+    ("32768 (~20 min)", 32768),
+];
+
+/// Which scalar config field the user is editing via the Win32 text-input
+/// popup. `main.rs` maps this back to a config mutation + menu rebuild when
+/// the popup returns.
+#[derive(Copy, Clone, Debug)]
+pub enum TextField {
+    LanguageHint,
+    ContextInfo,
+    GradioUrl,
+    GradioToken,
+    GradioCaCert,
+}
 
 pub struct TrayState {
     pub icon: TrayIcon,
@@ -134,6 +180,104 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
 
     menu.append(&PredefinedMenuItem::separator())?;
 
+    // Gradio server submenu — opens the text-input popup per field. We don't
+    // show the current token value (sensitive) in the submenu label, but
+    // URL and CA path are safe to include as a tooltip-ish suffix.
+    let gradio_sub = Submenu::new("Gradio server", true);
+    let url_label = if cfg.gradio.url.is_empty() {
+        "Edit URL…".to_string()
+    } else {
+        format!("Edit URL…  ({})", truncate_middle(&cfg.gradio.url, 48))
+    };
+    gradio_sub.append(&MenuItem::with_id(MenuId::new(ID_GR_URL), url_label, true, None))?;
+    let token_label = if cfg.gradio.api_token.is_empty() {
+        "Edit API token…  (empty)"
+    } else {
+        "Edit API token…  (set)"
+    };
+    gradio_sub.append(&MenuItem::with_id(
+        MenuId::new(ID_GR_TOKEN),
+        token_label,
+        true,
+        None,
+    ))?;
+    let ca_label = if cfg.gradio.extra_ca_cert.is_empty() {
+        "Edit CA cert path…  (empty)".to_string()
+    } else {
+        format!("Edit CA cert path…  ({})", truncate_middle(&cfg.gradio.extra_ca_cert, 48))
+    };
+    gradio_sub.append(&MenuItem::with_id(MenuId::new(ID_GR_CA), ca_label, true, None))?;
+    menu.append(&gradio_sub)?;
+
+    // Language submenu — preset checkmarks + Custom… for anything exotic.
+    let lang_sub = Submenu::new("Language", true);
+    let lang_cur = cfg.stt.language_hint.clone();
+    let lang_in_presets = LANGUAGE_OPTIONS
+        .iter()
+        .any(|opt| lang_cur.eq_ignore_ascii_case(opt));
+    for opt in LANGUAGE_OPTIONS {
+        let id = MenuId::new(format!("{PREFIX_LANG}{opt}"));
+        let item = CheckMenuItem::with_id(
+            id,
+            *opt,
+            true,
+            lang_cur.eq_ignore_ascii_case(opt),
+            None,
+        );
+        lang_sub.append(&item)?;
+    }
+    lang_sub.append(&PredefinedMenuItem::separator())?;
+    if !lang_in_presets && !lang_cur.is_empty() {
+        let label = format!("Current: {}", lang_cur);
+        let current = CheckMenuItem::new(label, false, true, None);
+        lang_sub.append(&current)?;
+    }
+    let lang_custom =
+        MenuItem::with_id(MenuId::new(ID_LANG_CUSTOM), "Custom…", true, None);
+    lang_sub.append(&lang_custom)?;
+    menu.append(&lang_sub)?;
+
+    // Context info free-form prompt — direct item, opens the dialog with
+    // the current value prefilled.
+    menu.append(&MenuItem::with_id(
+        MenuId::new(ID_CTX_EDIT),
+        "Edit context info…",
+        true,
+        None,
+    ))?;
+
+    // Max tokens submenu — fixed presets only, no custom. The spread covers
+    // push-to-talk bursts (4096) up to long dictations (32768); finer grain
+    // isn't worth the menu clutter.
+    let maxtok_sub = Submenu::new("Max tokens", true);
+    for (label, val) in MAXTOK_OPTIONS {
+        let id = MenuId::new(format!("{PREFIX_MAXTOK}{val}"));
+        let item = CheckMenuItem::with_id(
+            id,
+            *label,
+            true,
+            cfg.stt.max_new_tokens == *val,
+            None,
+        );
+        maxtok_sub.append(&item)?;
+    }
+    // Show current non-preset value (if any) as a disabled marker so the
+    // user can see what they've got even if they set it via config.toml.
+    let maxtok_in_presets = MAXTOK_OPTIONS.iter().any(|(_, v)| *v == cfg.stt.max_new_tokens);
+    if !maxtok_in_presets {
+        maxtok_sub.append(&PredefinedMenuItem::separator())?;
+        let cur = CheckMenuItem::new(
+            format!("Current: {}", cfg.stt.max_new_tokens),
+            false,
+            true,
+            None,
+        );
+        maxtok_sub.append(&cur)?;
+    }
+    menu.append(&maxtok_sub)?;
+
+    menu.append(&PredefinedMenuItem::separator())?;
+
     let autostart_item = CheckMenuItem::with_id(
         MenuId::new(ID_AUTOSTART),
         "Start with Windows",
@@ -238,6 +382,9 @@ pub struct MenuOutcome {
     pub hotkey_changed: bool,
     pub menu_dirty: bool,
     pub request_capture: bool,
+    /// Some(field) → main should open the Win32 text-input popup for that
+    /// config field (URL, token, language, etc.). None → nothing to do.
+    pub text_input_request: Option<TextField>,
 }
 
 pub fn handle_menu_event(
@@ -312,8 +459,51 @@ pub fn handle_menu_event(
             log::info!("Microphone set to '{}'", rest);
         }
         outcome.menu_dirty = true;
+    } else if id == ID_LANG_CUSTOM {
+        outcome.text_input_request = Some(TextField::LanguageHint);
+    } else if let Some(rest) = id.strip_prefix(PREFIX_LANG) {
+        let mut c = cfg.lock().unwrap();
+        if !c.stt.language_hint.eq_ignore_ascii_case(rest) {
+            c.stt.language_hint = rest.to_string();
+            c.save()?;
+            log::info!("Language hint set to '{}'", rest);
+        }
+        outcome.menu_dirty = true;
+    } else if let Some(rest) = id.strip_prefix(PREFIX_MAXTOK) {
+        // Parse-fail only happens if we wrote a malformed preset ID ourselves,
+        // so fall back to the default (8192, ~5 min) rather than silently
+        // ignoring the click.
+        let val: u32 = rest.parse().unwrap_or(8192);
+        let mut c = cfg.lock().unwrap();
+        if c.stt.max_new_tokens != val {
+            c.stt.max_new_tokens = val;
+            c.save()?;
+            log::info!("max_new_tokens set to {}", val);
+        }
+        outcome.menu_dirty = true;
+    } else if id == ID_CTX_EDIT {
+        outcome.text_input_request = Some(TextField::ContextInfo);
+    } else if id == ID_GR_URL {
+        outcome.text_input_request = Some(TextField::GradioUrl);
+    } else if id == ID_GR_TOKEN {
+        outcome.text_input_request = Some(TextField::GradioToken);
+    } else if id == ID_GR_CA {
+        outcome.text_input_request = Some(TextField::GradioCaCert);
     }
     Ok(outcome)
+}
+
+/// Shorten a long string for inline menu labels — keeps head + tail,
+/// drops the middle with `…`. Used so gradio URLs or long paths don't
+/// blow the menu width; the full value lives in the popup anyway.
+fn truncate_middle(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let keep = (max.saturating_sub(1)) / 2;
+    let head: String = s.chars().take(keep).collect();
+    let tail: String = s.chars().rev().take(keep).collect::<String>().chars().rev().collect();
+    format!("{head}…{tail}")
 }
 
 fn fallback_icon() -> Result<Icon> {

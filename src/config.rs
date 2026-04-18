@@ -57,7 +57,7 @@ impl Default for SttConfig {
     fn default() -> Self {
         Self {
             context_info: default_context_info(),
-            max_new_tokens: 16384,
+            max_new_tokens: 8192,
             language_hint: "Hungarian".to_string(),
         }
     }

@@ -35,6 +35,7 @@ mod hotkey_capture;
 mod injector;
 mod mouse_hook;
 mod singleton;
+mod text_input;
 mod tray;
 
 use config::{Config, OutputMode};
@@ -186,6 +187,15 @@ fn main() -> Result<()> {
         previous: String,
     }
     let mut pending_capture: Option<PendingCapture> = None;
+
+    // Same shape as PendingCapture but for scalar config fields (language,
+    // context info, gradio URL/token/CA path). We remember which field the
+    // popup is for so the callback at result-time knows where to store.
+    struct PendingTextInput {
+        handle: text_input::TextInputHandle,
+        field: tray::TextField,
+    }
+    let mut pending_text_input: Option<PendingTextInput> = None;
 
     // Pump hotkey/menu events periodically
     let proxy = event_loop.create_proxy();
@@ -404,6 +414,23 @@ fn main() -> Result<()> {
                                     });
                                 }
                             }
+                            if let Some(field) = outcome.text_input_request {
+                                if pending_text_input.is_some() {
+                                    log::info!(
+                                        "Text input already in progress, ignoring duplicate request"
+                                    );
+                                } else {
+                                    let (title, prompt, initial) =
+                                        text_input_params(field, &cfg_loop);
+                                    log::info!("Opening text input popup: {}", title);
+                                    pending_text_input = Some(PendingTextInput {
+                                        handle: text_input::ask_text_async(
+                                            &title, &prompt, &initial,
+                                        ),
+                                        field,
+                                    });
+                                }
+                            }
                             if outcome.menu_dirty {
                                 let snapshot = cfg_loop.lock().unwrap().clone();
                                 if let Err(e) = tray::rebuild_menu(&tray_keep_alive, &snapshot) {
@@ -473,10 +500,120 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+
+                // Poll pending text-input popup. Same polling shape as the
+                // hotkey capture above.
+                if let Some(pending) = pending_text_input.as_ref() {
+                    match pending.handle.rx.try_recv() {
+                        Ok(Ok(Some(new_val))) => {
+                            apply_text_input(pending.field, &new_val, &cfg_loop);
+                            let snapshot = cfg_loop.lock().unwrap().clone();
+                            if let Err(e) = tray::rebuild_menu(&tray_keep_alive, &snapshot) {
+                                log::error!(
+                                    "tray menu rebuild failed after text input: {e:#}"
+                                );
+                            }
+                            pending_text_input = None;
+                        }
+                        Ok(Ok(None)) => {
+                            log::info!("Text input cancelled");
+                            pending_text_input = None;
+                        }
+                        Ok(Err(e)) => {
+                            log::error!("Text input errored: {e:#}");
+                            pending_text_input = None;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            log::error!(
+                                "Text input worker disconnected without sending a result"
+                            );
+                            pending_text_input = None;
+                        }
+                    }
+                }
             }
             _ => {}
         }
     });
+}
+
+/// Compose (title, prompt, initial value) for the Win32 text-input popup
+/// based on which config field the user asked to edit.
+fn text_input_params(
+    field: tray::TextField,
+    cfg: &Arc<Mutex<Config>>,
+) -> (String, String, String) {
+    let c = cfg.lock().unwrap();
+    match field {
+        tray::TextField::LanguageHint => (
+            "vibe-dictate — language hint".to_string(),
+            "Preferred language name (e.g. Hungarian, English, Finnish):".to_string(),
+            c.stt.language_hint.clone(),
+        ),
+        tray::TextField::ContextInfo => (
+            "vibe-dictate — context info".to_string(),
+            "Prompt describing speaker + expected vocabulary (fed to ASR):".to_string(),
+            c.stt.context_info.clone(),
+        ),
+        tray::TextField::GradioUrl => (
+            "vibe-dictate — Gradio URL".to_string(),
+            "Base URL of the VibeVoice ASR Gradio server (http/https, no trailing slash):"
+                .to_string(),
+            c.gradio.url.clone(),
+        ),
+        tray::TextField::GradioToken => (
+            "vibe-dictate — Gradio API token".to_string(),
+            "Bearer token for remote Gradio (leave empty for local http://localhost):"
+                .to_string(),
+            c.gradio.api_token.clone(),
+        ),
+        tray::TextField::GradioCaCert => (
+            "vibe-dictate — extra CA cert path".to_string(),
+            "Absolute path to an extra PEM CA cert (leave empty for public/system CAs):"
+                .to_string(),
+            c.gradio.extra_ca_cert.clone(),
+        ),
+    }
+}
+
+/// Persist the user's text-input answer into the shared Config and save to
+/// disk. The trim matters because users often paste values with trailing
+/// whitespace — which would e.g. break Bearer auth silently.
+fn apply_text_input(field: tray::TextField, value: &str, cfg: &Arc<Mutex<Config>>) {
+    let trimmed = value.trim().to_string();
+    let mut c = cfg.lock().unwrap();
+    match field {
+        tray::TextField::LanguageHint => {
+            if trimmed.is_empty() {
+                log::info!("Empty language hint, keeping previous value");
+                return;
+            }
+            c.stt.language_hint = trimmed.clone();
+            log::info!("Language hint set to '{}'", trimmed);
+        }
+        tray::TextField::ContextInfo => {
+            // Keep the raw (untrimmed) value — the user might intentionally
+            // want leading/trailing whitespace in prompt wording.
+            c.stt.context_info = value.to_string();
+            log::info!("Context info updated ({} chars)", value.len());
+        }
+        tray::TextField::GradioUrl => {
+            c.gradio.url = trimmed.clone();
+            log::info!("Gradio URL set to '{}'", trimmed);
+        }
+        tray::TextField::GradioToken => {
+            c.gradio.api_token = trimmed;
+            log::info!("Gradio API token updated (length {})", c.gradio.api_token.len());
+        }
+        tray::TextField::GradioCaCert => {
+            c.gradio.extra_ca_cert = trimmed.clone();
+            log::info!("Gradio extra CA cert path set to '{}'", trimmed);
+        }
+    }
+    if let Err(e) = c.save() {
+        log::error!("save config after text input failed: {e:#}");
+    }
 }
 
 fn send_and_inject(
