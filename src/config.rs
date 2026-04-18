@@ -48,11 +48,41 @@ pub struct SttConfig {
 impl Default for SttConfig {
     fn default() -> Self {
         Self {
-            context_info: String::new(),
+            context_info: default_context_info(),
             max_new_tokens: 16384,
-            language_hint: "hu".to_string(),
+            language_hint: "Hungarian".to_string(),
         }
     }
+}
+
+/// Map short ISO 639-1 codes (or obvious two-letter variants) to the full
+/// English language names the ASR model's prompt handling responds to
+/// best. Returns None if the hint already looks like a full name.
+fn iso_to_language_name(hint: &str) -> Option<&'static str> {
+    match hint.trim().to_ascii_lowercase().as_str() {
+        "hu" => Some("Hungarian"),
+        "en" => Some("English"),
+        "de" => Some("German"),
+        "fr" => Some("French"),
+        "es" => Some("Spanish"),
+        "it" => Some("Italian"),
+        "pt" => Some("Portuguese"),
+        "pl" => Some("Polish"),
+        "nl" => Some("Dutch"),
+        "ja" => Some("Japanese"),
+        "ko" => Some("Korean"),
+        "zh" => Some("Chinese"),
+        _ => None,
+    }
+}
+
+/// Default prompt we feed to VibeVoice ASR when context_info isn't filled
+/// in explicitly. Without a language anchor the model guesses wildly on
+/// short utterances and on sentences that mix Hungarian + English terms;
+/// this prompt tells it to stay in Hungarian as the default language but
+/// leave code-mixed English words intact (brand names, tech jargon, etc.).
+fn default_context_info() -> String {
+    "The speaker uses Hungarian as the primary language, and may mix in English technical terms, proper nouns, brand names, and abbreviations. Transcribe verbatim — keep each word in its original language, do not translate.".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +220,26 @@ impl Config {
                 self.hotkey.binding
             );
             self.hotkey.binding = "F8".to_string();
+            changed = true;
+        }
+
+        // Upgrade 2-letter ISO hints to full English language names — ASR
+        // prompt quality is measurably better with "Hungarian" than "hu".
+        if let Some(expanded) = iso_to_language_name(&self.stt.language_hint) {
+            log::info!(
+                "Migrating language_hint '{}' → '{}'",
+                self.stt.language_hint,
+                expanded
+            );
+            self.stt.language_hint = expanded.to_string();
+            changed = true;
+        }
+
+        // If context_info is empty, seed a sensible default prompt that
+        // anchors on the user's primary language and allows mixed terms.
+        if self.stt.context_info.trim().is_empty() {
+            log::info!("Seeding default context_info prompt");
+            self.stt.context_info = default_context_info();
             changed = true;
         }
         changed

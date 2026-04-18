@@ -27,6 +27,25 @@ pub struct TrayState {
     pub icon: TrayIcon,
 }
 
+/// Authoritative tray icon state. The event loop computes one of these
+/// every tick from (recorder, flash_until, ...) and the reconciler only
+/// re-paints the TrayIcon when the value actually changes — that way
+/// a red cancel-flash can never get stranded if in_flight delays idle.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TrayStatus {
+    Idle,
+    Recording,
+    CancelFlash,
+}
+
+pub fn apply_status(state: &TrayState, status: TrayStatus, binding: &str) -> Result<()> {
+    match status {
+        TrayStatus::Idle => set_recording(state, false, binding),
+        TrayStatus::Recording => set_recording(state, true, ""),
+        TrayStatus::CancelFlash => set_cancel_flash(state),
+    }
+}
+
 pub fn build(cfg: &Config) -> Result<TrayState> {
     let menu = build_menu(cfg)?;
     let icon = fallback_icon()?;

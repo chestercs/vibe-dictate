@@ -94,12 +94,16 @@ impl GradioClient {
         // this exact order — see /gradio_api/info on the running server. The
         // first is the FileData; the next three (path/start/end) are only for
         // long-audio segmentation and stay empty in push-to-talk usage.
-        // language_hint isn't a first-class parameter, so we fold it into
-        // context_info as a hint sentence when context_info is otherwise empty.
-        let effective_context = if context_info.is_empty() && !language_hint.is_empty() {
-            format!("Spoken language: {}.", language_hint)
-        } else {
-            context_info.to_string()
+        // language_hint isn't a first-class parameter, so we fold it in as a
+        // "Preferred language:" prefix and keep the user's context_info as
+        // the free-form body — that way both signals reach the model.
+        let lang = language_hint.trim();
+        let ctx = context_info.trim();
+        let effective_context = match (lang.is_empty(), ctx.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => ctx.to_string(),
+            (false, true) => format!("Preferred language: {}.", lang),
+            (false, false) => format!("Preferred language: {}. {}", lang, ctx),
         };
 
         let body = json!({
