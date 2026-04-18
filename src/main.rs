@@ -239,9 +239,9 @@ fn send_and_inject(wav: Vec<u8>, cfg: Arc<Mutex<Config>>) -> Result<()> {
     Ok(())
 }
 
-/// VibeVoice ASR returns single-word bracketed meta tags ("[Music]", "[Noise]",
-/// "[Silence]") when no actual speech is detected. We treat those as silence
-/// rather than pasting them into the user's focused window.
+/// VibeVoice ASR returns bracketed meta tags ("[Music]", "[Noise]",
+/// "[Silence]", "[Unintelligible Speech]") when no actual speech is detected.
+/// Pasting them into the focused window is never useful — drop them silently.
 fn is_meta_only(text: &str) -> bool {
     let t = text.trim();
     let inner = match (t.strip_prefix('['), t.strip_suffix(']')) {
@@ -251,7 +251,7 @@ fn is_meta_only(text: &str) -> bool {
     !inner.is_empty()
         && inner
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ' ')
 }
 
 fn init_logger() {
