@@ -26,6 +26,29 @@ enum AppEvent {
     Tick,
 }
 
+struct HotkeyState {
+    manager: GlobalHotKeyManager,
+    current: HotKey,
+}
+
+impl HotkeyState {
+    fn rebind(&mut self, new_binding: &str) -> Result<()> {
+        let new_hk = parse_hotkey(new_binding)
+            .with_context(|| format!("parse hotkey '{}'", new_binding))?;
+        self.manager
+            .unregister(self.current)
+            .context("unregister previous hotkey")?;
+        if let Err(e) = self.manager.register(new_hk) {
+            // Try to restore the previous binding so the app stays usable.
+            let _ = self.manager.register(self.current);
+            return Err(anyhow!("register new hotkey '{}' failed: {:#}", new_binding, e));
+        }
+        self.current = new_hk;
+        log::info!("Hotkey rebound to {}", new_binding);
+        Ok(())
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("vibe-dictate v{} starting", env!("CARGO_PKG_VERSION"));
@@ -45,17 +68,22 @@ fn main() -> Result<()> {
     // Tray icon + menu
     let tray_state = tray::build(&cfg.lock().unwrap())?;
 
-    // Global hotkey
+    // Global hotkey — manager + currently registered HotKey kept together so the
+    // tray menu callback can rebind on the fly.
     let hotkey_manager = GlobalHotKeyManager::new().context("hotkey manager init")?;
-    let hotkey = parse_hotkey(&cfg.lock().unwrap().hotkey.binding)
+    let initial_hotkey = parse_hotkey(&cfg.lock().unwrap().hotkey.binding)
         .context("parse hotkey binding")?;
     hotkey_manager
-        .register(hotkey)
+        .register(initial_hotkey)
         .context("register global hotkey")?;
     log::info!(
         "Registered hotkey: {}",
         cfg.lock().unwrap().hotkey.binding
     );
+    let hotkey_state = HotkeyState {
+        manager: hotkey_manager,
+        current: initial_hotkey,
+    };
 
     // Recording state
     let recorder: Arc<Mutex<Option<audio::Recorder>>> = Arc::new(Mutex::new(None));
@@ -65,8 +93,10 @@ fn main() -> Result<()> {
     let recorder_loop = recorder.clone();
     let press_time_loop = press_time.clone();
 
-    // Keep tray in scope for lifetime of event loop
-    let _tray_keep_alive = tray_state;
+    // Keep tray + hotkey state alive for the event loop. The closure takes
+    // ownership; HotkeyState is mutated via &mut self when rebinding.
+    let tray_keep_alive = tray_state;
+    let mut hotkey_state = hotkey_state;
 
     // Pump hotkey/menu events periodically
     let proxy = event_loop.create_proxy();
@@ -141,8 +171,22 @@ fn main() -> Result<()> {
 
                 // Drain menu events
                 while let Ok(me) = MenuEvent::receiver().try_recv() {
-                    if let Err(e) = tray::handle_menu_event(&me, &cfg_loop) {
-                        log::error!("menu event error: {e:#}");
+                    match tray::handle_menu_event(&me, &cfg_loop) {
+                        Ok(outcome) => {
+                            if outcome.hotkey_changed {
+                                let new_binding = cfg_loop.lock().unwrap().hotkey.binding.clone();
+                                if let Err(e) = hotkey_state.rebind(&new_binding) {
+                                    log::error!("hotkey rebind failed: {e:#}");
+                                }
+                            }
+                            if outcome.menu_dirty {
+                                let snapshot = cfg_loop.lock().unwrap().clone();
+                                if let Err(e) = tray::rebuild_menu(&tray_keep_alive, &snapshot) {
+                                    log::error!("tray menu rebuild failed: {e:#}");
+                                }
+                            }
+                        }
+                        Err(e) => log::error!("menu event error: {e:#}"),
                     }
                     if tray::is_quit(&me) {
                         *control_flow = ControlFlow::Exit;
@@ -219,6 +263,8 @@ fn parse_code(name: &str) -> Option<Code> {
         "escape" | "esc" => Code::Escape,
         "backspace" => Code::Backspace,
         "capslock" => Code::CapsLock,
+        "pause" => Code::Pause,
+        "scrolllock" | "scroll" => Code::ScrollLock,
         "f1" => Code::F1,
         "f2" => Code::F2,
         "f3" => Code::F3,

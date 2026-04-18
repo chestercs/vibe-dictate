@@ -78,10 +78,13 @@ pub struct HotkeyConfig {
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
-            binding: "RightAlt+Space".to_string(),
+            binding: "F8".to_string(),
         }
     }
 }
+
+pub const HOTKEY_OPTIONS: &[&str] =
+    &["F7", "F8", "F9", "F10", "F11", "F12", "Pause", "ScrollLock"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputConfig {
@@ -152,10 +155,36 @@ impl Config {
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("Read {}", path.display()))?;
-        let cfg: Config = toml::from_str(&text)
+        let mut cfg: Config = toml::from_str(&text)
             .with_context(|| format!("Parse {}", path.display()))?;
         log::info!("Loaded config from {}", path.display());
+        if cfg.migrate_in_place() {
+            cfg.save()?;
+            log::info!("Migrated stale config values to defaults");
+        }
         Ok(cfg)
+    }
+
+    fn migrate_in_place(&mut self) -> bool {
+        let mut changed = false;
+        // Alt-based hotkeys conflict with Windows app menus and AltGr (RightAlt = Ctrl+Alt
+        // on Hungarian layouts) tends to leave Alt stuck. Force-migrate to F8 default.
+        let lower = self.hotkey.binding.to_ascii_lowercase();
+        let has_alt = lower.split('+').any(|t| {
+            matches!(
+                t.trim(),
+                "alt" | "rightalt" | "altgr" | "leftalt"
+            )
+        });
+        if has_alt {
+            log::warn!(
+                "Migrating Alt-based hotkey '{}' to 'F8' (Alt conflicts with app menus)",
+                self.hotkey.binding
+            );
+            self.hotkey.binding = "F8".to_string();
+            changed = true;
+        }
+        changed
     }
 
     pub fn save(&self) -> Result<()> {

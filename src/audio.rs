@@ -114,6 +114,19 @@ impl Recorder {
     }
 }
 
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    match host.input_devices() {
+        Ok(it) => it
+            .filter_map(|d| d.name().ok())
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            log::warn!("Failed to enumerate input devices: {e:#}");
+            Vec::new()
+        }
+    }
+}
+
 fn pick_input_device(
     host: &cpal::Host,
     name: &str,

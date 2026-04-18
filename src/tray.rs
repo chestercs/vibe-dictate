@@ -1,123 +1,212 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use once_cell::sync::OnceCell;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{
+    CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
+use crate::audio;
 use crate::autostart;
-use crate::config::{Config, OutputMode};
+use crate::config::{Config, OutputMode, HOTKEY_OPTIONS};
+
+// Stable menu IDs. Using prefixed strings instead of opaque generated IDs lets us
+// keep the menu rebuildable without storing every MenuItem handle in shared state.
+const ID_QUIT: &str = "vd:quit";
+const ID_RELOAD: &str = "vd:reload";
+const ID_AUTOSTART: &str = "vd:autostart";
+const ID_OUT_CLIPBOARD: &str = "vd:out:clipboard";
+const ID_OUT_SENDINPUT: &str = "vd:out:sendinput";
+const PREFIX_HOTKEY: &str = "vd:hotkey:";
+const PREFIX_MIC: &str = "vd:mic:";
+const ID_MIC_DEFAULT: &str = "vd:mic:__default__";
 
 pub struct TrayState {
-    _icon: TrayIcon,
-    ids: TrayIds,
+    pub icon: TrayIcon,
 }
-
-pub struct TrayIds {
-    quit: String,
-    reload: String,
-    autostart: String,
-    mode_clipboard: String,
-    mode_sendinput: String,
-}
-
-static IDS: OnceCell<TrayIds> = OnceCell::new();
 
 pub fn build(cfg: &Config) -> Result<TrayState> {
-    let menu = Menu::new();
-
-    let reload = MenuItem::new("Reload config", true, None);
-    let autostart_item =
-        CheckMenuItem::new("Start with Windows", true, cfg.startup.autostart, None);
-    let mode_clipboard = CheckMenuItem::new(
-        "Output: Clipboard + Ctrl+V",
-        true,
-        cfg.output.mode == OutputMode::Clipboard,
-        None,
-    );
-    let mode_sendinput = CheckMenuItem::new(
-        "Output: SendInput (direct typing)",
-        true,
-        cfg.output.mode == OutputMode::Sendinput,
-        None,
-    );
-    let quit = MenuItem::new("Quit", true, None);
-
-    let ids = TrayIds {
-        quit: quit.id().0.clone(),
-        reload: reload.id().0.clone(),
-        autostart: autostart_item.id().0.clone(),
-        mode_clipboard: mode_clipboard.id().0.clone(),
-        mode_sendinput: mode_sendinput.id().0.clone(),
-    };
-
-    menu.append(&reload)?;
-    menu.append(&PredefinedMenuItem::separator())?;
-    menu.append(&autostart_item)?;
-    menu.append(&mode_clipboard)?;
-    menu.append(&mode_sendinput)?;
-    menu.append(&PredefinedMenuItem::separator())?;
-    menu.append(&quit)?;
-
+    let menu = build_menu(cfg)?;
     let icon = fallback_icon()?;
 
     let tray = TrayIconBuilder::new()
-        .with_tooltip(format!(
-            "vibe-dictate — hotkey: {}",
-            cfg.hotkey.binding
-        ))
+        .with_tooltip(format!("vibe-dictate — hotkey: {}", cfg.hotkey.binding))
         .with_icon(icon)
         .with_menu(Box::new(menu))
         .build()
         .context("tray build")?;
 
-    let state = TrayState {
-        _icon: tray,
-        ids: TrayIds {
-            quit: ids.quit.clone(),
-            reload: ids.reload.clone(),
-            autostart: ids.autostart.clone(),
-            mode_clipboard: ids.mode_clipboard.clone(),
-            mode_sendinput: ids.mode_sendinput.clone(),
-        },
-    };
-    let _ = IDS.set(ids);
-    Ok(state)
+    Ok(TrayState { icon: tray })
+}
+
+fn build_menu(cfg: &Config) -> Result<Menu> {
+    let menu = Menu::new();
+
+    let reload = MenuItem::with_id(MenuId::new(ID_RELOAD), "Reload config", true, None);
+    menu.append(&reload)?;
+    menu.append(&PredefinedMenuItem::separator())?;
+
+    // Hotkey submenu — F-keys + Pause/ScrollLock; Alt-based bindings intentionally
+    // omitted (they collide with Windows app menus / AltGr stuck-key issues).
+    let hotkey_sub = Submenu::new("Hotkey", true);
+    for opt in HOTKEY_OPTIONS {
+        let id = MenuId::new(format!("{PREFIX_HOTKEY}{opt}"));
+        let item = CheckMenuItem::with_id(
+            id,
+            *opt,
+            true,
+            cfg.hotkey.binding.eq_ignore_ascii_case(opt),
+            None,
+        );
+        hotkey_sub.append(&item)?;
+    }
+    menu.append(&hotkey_sub)?;
+
+    // Microphone submenu — default + every enumerated input device.
+    let mic_sub = Submenu::new("Microphone", true);
+    let default_item = CheckMenuItem::with_id(
+        MenuId::new(ID_MIC_DEFAULT),
+        "(System default)",
+        true,
+        cfg.audio.mic_device.is_empty(),
+        None,
+    );
+    mic_sub.append(&default_item)?;
+    let devices = audio::list_input_devices();
+    if !devices.is_empty() {
+        mic_sub.append(&PredefinedMenuItem::separator())?;
+    }
+    for name in &devices {
+        let id = MenuId::new(format!("{PREFIX_MIC}{name}"));
+        let item = CheckMenuItem::with_id(
+            id,
+            name.as_str(),
+            true,
+            cfg.audio.mic_device == *name,
+            None,
+        );
+        mic_sub.append(&item)?;
+    }
+    menu.append(&mic_sub)?;
+
+    menu.append(&PredefinedMenuItem::separator())?;
+
+    let autostart_item = CheckMenuItem::with_id(
+        MenuId::new(ID_AUTOSTART),
+        "Start with Windows",
+        true,
+        cfg.startup.autostart,
+        None,
+    );
+    menu.append(&autostart_item)?;
+
+    let mode_clipboard = CheckMenuItem::with_id(
+        MenuId::new(ID_OUT_CLIPBOARD),
+        "Output: Clipboard + Ctrl+V",
+        true,
+        cfg.output.mode == OutputMode::Clipboard,
+        None,
+    );
+    let mode_sendinput = CheckMenuItem::with_id(
+        MenuId::new(ID_OUT_SENDINPUT),
+        "Output: SendInput (direct typing)",
+        true,
+        cfg.output.mode == OutputMode::Sendinput,
+        None,
+    );
+    menu.append(&mode_clipboard)?;
+    menu.append(&mode_sendinput)?;
+
+    menu.append(&PredefinedMenuItem::separator())?;
+
+    let quit = MenuItem::with_id(MenuId::new(ID_QUIT), "Quit", true, None);
+    menu.append(&quit)?;
+
+    Ok(menu)
+}
+
+pub fn rebuild_menu(state: &TrayState, cfg: &Config) -> Result<()> {
+    let menu = build_menu(cfg)?;
+    state.icon.set_menu(Some(Box::new(menu)));
+    let _ = state
+        .icon
+        .set_tooltip(Some(format!("vibe-dictate — hotkey: {}", cfg.hotkey.binding)));
+    Ok(())
 }
 
 pub fn is_quit(e: &MenuEvent) -> bool {
-    IDS.get()
-        .map(|ids| e.id().0 == ids.quit)
-        .unwrap_or(false)
+    e.id().0 == ID_QUIT
 }
 
-pub fn handle_menu_event(e: &MenuEvent, cfg: &Arc<Mutex<Config>>) -> Result<()> {
-    let ids = match IDS.get() {
-        Some(i) => i,
-        None => return Ok(()),
-    };
-    let id = &e.id().0;
+/// Result of handling a menu event so main can react (rebind hotkey, rebuild menu).
+#[derive(Debug, Default)]
+pub struct MenuOutcome {
+    pub hotkey_changed: bool,
+    pub menu_dirty: bool,
+}
 
-    if id == &ids.reload {
+pub fn handle_menu_event(
+    e: &MenuEvent,
+    cfg: &Arc<Mutex<Config>>,
+) -> Result<MenuOutcome> {
+    let id = e.id().0.as_str();
+    let mut outcome = MenuOutcome::default();
+
+    if id == ID_RELOAD {
         let reloaded = Config::load_or_default()?;
         *cfg.lock().unwrap() = reloaded;
         log::info!("Config reloaded from disk");
-    } else if id == &ids.autostart {
+        outcome.hotkey_changed = true;
+        outcome.menu_dirty = true;
+    } else if id == ID_AUTOSTART {
         let new_val = !cfg.lock().unwrap().startup.autostart;
-        cfg.lock().unwrap().startup.autostart = new_val;
-        cfg.lock().unwrap().save()?;
+        {
+            let mut c = cfg.lock().unwrap();
+            c.startup.autostart = new_val;
+            c.save()?;
+        }
         autostart::set_enabled(new_val)?;
         log::info!("Autostart set to {}", new_val);
-    } else if id == &ids.mode_clipboard {
-        cfg.lock().unwrap().output.mode = OutputMode::Clipboard;
-        cfg.lock().unwrap().save()?;
+        outcome.menu_dirty = true;
+    } else if id == ID_OUT_CLIPBOARD {
+        let mut c = cfg.lock().unwrap();
+        c.output.mode = OutputMode::Clipboard;
+        c.save()?;
         log::info!("Output mode: Clipboard");
-    } else if id == &ids.mode_sendinput {
-        cfg.lock().unwrap().output.mode = OutputMode::Sendinput;
-        cfg.lock().unwrap().save()?;
+        outcome.menu_dirty = true;
+    } else if id == ID_OUT_SENDINPUT {
+        let mut c = cfg.lock().unwrap();
+        c.output.mode = OutputMode::Sendinput;
+        c.save()?;
         log::info!("Output mode: SendInput");
+        outcome.menu_dirty = true;
+    } else if let Some(rest) = id.strip_prefix(PREFIX_HOTKEY) {
+        let mut c = cfg.lock().unwrap();
+        if !c.hotkey.binding.eq_ignore_ascii_case(rest) {
+            c.hotkey.binding = rest.to_string();
+            c.save()?;
+            log::info!("Hotkey set to {}", rest);
+            outcome.hotkey_changed = true;
+        }
+        outcome.menu_dirty = true;
+    } else if id == ID_MIC_DEFAULT {
+        let mut c = cfg.lock().unwrap();
+        if !c.audio.mic_device.is_empty() {
+            c.audio.mic_device = String::new();
+            c.save()?;
+            log::info!("Microphone reset to system default");
+        }
+        outcome.menu_dirty = true;
+    } else if let Some(rest) = id.strip_prefix(PREFIX_MIC) {
+        let mut c = cfg.lock().unwrap();
+        if c.audio.mic_device != rest {
+            c.audio.mic_device = rest.to_string();
+            c.save()?;
+            log::info!("Microphone set to '{}'", rest);
+        }
+        outcome.menu_dirty = true;
     }
-    Ok(())
+    Ok(outcome)
 }
 
 fn fallback_icon() -> Result<Icon> {
