@@ -161,7 +161,7 @@ pub fn is_quit(e: &MenuEvent) -> bool {
 
 pub fn set_recording(state: &TrayState, recording: bool, binding: &str) -> Result<()> {
     let icon = if recording {
-        indicator_icon(220, 50, 50)?
+        indicator_icon(60, 180, 80)?
     } else {
         indicator_icon(30, 120, 220)?
     };
@@ -172,6 +172,19 @@ pub fn set_recording(state: &TrayState, recording: bool, binding: &str) -> Resul
         format!("vibe-dictate — hotkey: {}", binding)
     };
     let _ = state.icon.set_tooltip(Some(tip));
+    Ok(())
+}
+
+/// Flash a red tray icon to acknowledge a double-tap cancel. The caller is
+/// expected to restore the idle icon after a short delay via the usual
+/// `set_recording(&tray, false, ..)` path — we don't spawn a timer here
+/// because TrayIcon isn't Send and the main event loop already ticks often.
+pub fn set_cancel_flash(state: &TrayState) -> Result<()> {
+    let icon = indicator_icon(220, 50, 50)?;
+    state.icon.set_icon(Some(icon)).context("tray set_icon cancel")?;
+    let _ = state
+        .icon
+        .set_tooltip(Some("vibe-dictate — cancelled".to_string()));
     Ok(())
 }
 

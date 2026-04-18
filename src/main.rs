@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 /// take >500ms between press-events) won't be read as a cancel.
 const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(400);
 
+/// How long the red "cancelled" icon stays up after a double-tap before
+/// snapping back to idle blue.
+const CANCEL_FLASH_DURATION: Duration = Duration::from_millis(1200);
+
 use anyhow::{anyhow, Context, Result};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
@@ -106,6 +110,10 @@ fn main() -> Result<()> {
     let last_press_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let cancel_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let in_flight: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    // When Some(t), the tray is showing the red cancel-flash icon until `t`;
+    // the event-loop tick below snaps it back to idle blue once the deadline
+    // passes and nothing else is owning the icon.
+    let flash_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
     let cfg_loop = cfg.clone();
     let recorder_loop = recorder.clone();
@@ -113,6 +121,7 @@ fn main() -> Result<()> {
     let last_press_at_loop = last_press_at.clone();
     let cancel_flag_loop = cancel_flag.clone();
     let in_flight_loop = in_flight.clone();
+    let flash_until_loop = flash_until.clone();
 
     // Keep tray + hotkey state alive for the event loop. The closure takes
     // ownership; HotkeyState is mutated via &mut self when rebinding.
@@ -131,6 +140,29 @@ fn main() -> Result<()> {
 
         match event {
             tao::event::Event::UserEvent(AppEvent::Tick) => {
+                // If a cancel-flash deadline has passed and nothing else is
+                // holding the icon (no recording, no in-flight request), snap
+                // back to idle blue. If something is active, just clear the
+                // deadline and let that flow own the icon.
+                let flash_expired = {
+                    let mut guard = flash_until_loop.lock().unwrap();
+                    match *guard {
+                        Some(t) if Instant::now() >= t => {
+                            *guard = None;
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if flash_expired {
+                    let idle = recorder_loop.lock().unwrap().is_none()
+                        && !in_flight_loop.load(Ordering::SeqCst);
+                    if idle {
+                        let binding = cfg_loop.lock().unwrap().hotkey.binding.clone();
+                        let _ = tray::set_recording(&tray_keep_alive, false, &binding);
+                    }
+                }
+
                 // Drain hotkey events
                 while let Ok(hk_evt) = GlobalHotKeyEvent::receiver().try_recv() {
                     match hk_evt.state {
@@ -164,12 +196,9 @@ fn main() -> Result<()> {
                                     );
                                 }
                                 *press_time_loop.lock().unwrap() = None;
-                                let binding = cfg_loop.lock().unwrap().hotkey.binding.clone();
-                                let _ = tray::set_recording(
-                                    &tray_keep_alive,
-                                    false,
-                                    &binding,
-                                );
+                                let _ = tray::set_cancel_flash(&tray_keep_alive);
+                                *flash_until_loop.lock().unwrap() =
+                                    Some(Instant::now() + CANCEL_FLASH_DURATION);
                             } else {
                                 let mut slot = recorder_loop.lock().unwrap();
                                 if slot.is_none() {
