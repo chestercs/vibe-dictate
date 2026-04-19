@@ -52,13 +52,36 @@ def load_model(model_id: str, dtype: str):
     return processor, model
 
 
-def transcribe(processor, asr_model, audio_path: str, language: Optional[str], max_new_tokens: int):
+def build_prompt(language: Optional[str], prompt: Optional[str]) -> Optional[str]:
+    """Combine the OpenAI `language` hint and the OpenAI `prompt` field into
+    a single text turn passed to the processor. VibeVoice-ASR's
+    apply_transcription_request only accepts a `prompt` argument — there is
+    no `language` kwarg — so language has to be baked into the prompt text
+    or the model free-hallucinates the output language (EN/DE commonly)
+    when the utterance is short or code-mixed.
+    """
+    parts: list[str] = []
+    if language and language.strip():
+        parts.append(f"Transcribe this audio in {language.strip()}.")
+    if prompt and prompt.strip():
+        parts.append(prompt.strip())
+    if not parts:
+        return None
+    return " ".join(parts)
+
+
+def transcribe(
+    processor,
+    asr_model,
+    audio_path: str,
+    language: Optional[str],
+    prompt: Optional[str],
+    max_new_tokens: int,
+):
     kwargs = {"audio": audio_path}
-    if language:
-        # HF-HF variant's apply_transcription_request accepts a language hint;
-        # pass-through lets either ISO-639-1 ("hu") or full name ("hungarian")
-        # flow straight to the processor, which knows the canonical list.
-        kwargs["language"] = language
+    combined_prompt = build_prompt(language, prompt)
+    if combined_prompt:
+        kwargs["prompt"] = combined_prompt
     inputs = processor.apply_transcription_request(**kwargs).to(asr_model.device, asr_model.dtype)
 
     prompt_len = inputs["input_ids"].shape[1]
@@ -158,7 +181,7 @@ def build_app(processor, asr_model, model_id: str, api_key: Optional[str], max_n
         file: UploadFile = File(...),
         model: str = Form(default=model_id),  # noqa: ARG001 — ignored, we serve one model
         language: Optional[str] = Form(default=None),
-        prompt: Optional[str] = Form(default=None),  # noqa: ARG001 — VibeVoice has own hotwords
+        prompt: Optional[str] = Form(default=None),
         response_format: str = Form(default="json"),
         temperature: float = Form(default=0.0),  # noqa: ARG001 — deterministic for now
         authorization: Optional[str] = Header(default=None),
@@ -175,7 +198,12 @@ def build_app(processor, asr_model, model_id: str, api_key: Optional[str], max_n
             tmp_path = tf.name
         try:
             text, parsed, elapsed = transcribe(
-                processor, asr_model, tmp_path, language=language, max_new_tokens=max_new_tokens
+                processor,
+                asr_model,
+                tmp_path,
+                language=language,
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
             )
         finally:
             try:

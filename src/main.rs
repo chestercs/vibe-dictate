@@ -760,7 +760,11 @@ fn send_and_inject(
             return Ok(());
         }
     };
-    let text = match client.transcribe(wav, &stt_cfg.language_hint) {
+    let text = match client.transcribe(
+        wav,
+        &stt_cfg.language_hint,
+        &stt_cfg.context_info,
+    ) {
         Ok(t) => {
             connection_ok.store(true, Ordering::SeqCst);
             t
@@ -780,7 +784,6 @@ fn send_and_inject(
         }
     };
     let _ = stt_cfg.max_new_tokens; // server-enforced; see ServerConfig docs
-    let _ = &stt_cfg.context_info; // reserved for server-side prompt support
 
     // Final cancel check: user double-tapped while the server was crunching.
     // Drop the result instead of pasting it. We don't try to abort the HTTP

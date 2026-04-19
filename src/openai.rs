@@ -168,6 +168,7 @@ impl SttClient {
         &self,
         wav: Vec<u8>,
         language_hint: &str,
+        prompt: &str,
     ) -> std::result::Result<String, TranscribeError> {
         log::info!(
             "STT: posting WAV ({} bytes) to {}",
@@ -187,6 +188,14 @@ impl SttClient {
         let lang = language_hint.trim();
         if !lang.is_empty() {
             form = form.text("language", lang.to_string());
+        }
+        // OpenAI-spec `prompt` doubles as a context anchor. The server merges
+        // this with `language` into a single chat turn fed to the processor —
+        // without it VibeVoice-ASR free-hallucinates the output language on
+        // short or code-mixed utterances.
+        let prompt_trim = prompt.trim();
+        if !prompt_trim.is_empty() {
+            form = form.text("prompt", prompt_trim.to_string());
         }
 
         let url = format!("{}/v1/audio/transcriptions", self.base_url);
