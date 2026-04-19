@@ -53,8 +53,9 @@ mod mouse_hook;
 mod singleton;
 mod text_input;
 mod tray;
+mod vad;
 
-use config::{Config, OutputMode};
+use config::{Config, InputMode, OutputMode};
 
 #[derive(Debug, Clone)]
 enum AppEvent {
@@ -155,10 +156,18 @@ fn main() -> Result<()> {
     // Binding router — covers both keyboard (via global-hotkey) and mouse
     // (via the hook) paths behind a single `apply(binding)` entrypoint.
     let mut binding_manager = BindingManager::new(mouse_handle.binding.clone())?;
-    let initial_binding = cfg.lock().unwrap().hotkey.binding.clone();
-    binding_manager
-        .apply(&initial_binding)
-        .with_context(|| format!("apply initial binding '{}'", initial_binding))?;
+
+    // Voice-activation session handle. `Some` ⇒ mic is hot, VAD worker is
+    // producing `VadSessionEvent::Utterance` messages; `None` ⇒ PTT mode.
+    // Exactly one of (binding_manager active, vad_session Some) is ever
+    // engaged — `apply_input_mode` enforces that invariant.
+    let mut vad_session: Option<audio::VadSession> = None;
+
+    // Apply the configured input mode on startup.
+    {
+        let snapshot = cfg.lock().unwrap().clone();
+        apply_input_mode(&snapshot, &mut binding_manager, &mut vad_session);
+    }
 
     // Recording state
     let recorder: Arc<Mutex<Option<audio::Recorder>>> = Arc::new(Mutex::new(None));
@@ -192,6 +201,10 @@ fn main() -> Result<()> {
     // in_flight delays idle.
     let last_status: Arc<Mutex<(tray::TrayStatus, Option<String>)>> =
         Arc::new(Mutex::new((tray::TrayStatus::Idle, None)));
+    // Tracks whether the VAD has an open utterance right now. Used purely
+    // for the tray icon (Recording green while VAD speaks, else the teal
+    // VadListening when the mic is hot but idle).
+    let vad_speech_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     let cfg_loop = cfg.clone();
     let recorder_loop = recorder.clone();
@@ -204,6 +217,7 @@ fn main() -> Result<()> {
     let last_error_note_loop = last_error_note.clone();
     let connection_ok_loop = connection_ok.clone();
     let last_status_loop = last_status.clone();
+    let vad_speech_active_loop = vad_speech_active.clone();
 
     // Keep tray + binding + mouse-hook state alive for the event loop.
     let tray_keep_alive = tray_state;
@@ -316,26 +330,37 @@ fn main() -> Result<()> {
                     }
                 };
                 let recording = recorder_loop.lock().unwrap().is_some();
-                let processing = !recording && in_flight_loop.load(Ordering::SeqCst);
+                let vad_speaking = vad_speech_active_loop.load(Ordering::SeqCst);
+                let processing = !recording
+                    && !vad_speaking
+                    && in_flight_loop.load(Ordering::SeqCst);
                 let disconnected = !connection_ok_loop.load(Ordering::SeqCst);
+                let vad_mode_active = {
+                    let c = cfg_loop.lock().unwrap();
+                    c.input.mode == InputMode::VoiceActivation
+                };
 
                 let desired = if flash_error {
                     tray::TrayStatus::ErrorFlash
                 } else if flash_cancel {
                     tray::TrayStatus::CancelFlash
-                } else if recording {
+                } else if recording || vad_speaking {
                     tray::TrayStatus::Recording
                 } else if processing {
                     tray::TrayStatus::Processing
                 } else if disconnected {
                     tray::TrayStatus::Disconnected
+                } else if vad_mode_active {
+                    tray::TrayStatus::VadListening
                 } else {
                     tray::TrayStatus::Idle
                 };
                 // Only surface the note when we have something relevant to
                 // say: any red/gray state, or idle with a still-fresh note.
                 let tip_note = match desired {
-                    tray::TrayStatus::Recording | tray::TrayStatus::Processing => None,
+                    tray::TrayStatus::Recording
+                    | tray::TrayStatus::Processing
+                    | tray::TrayStatus::VadListening => None,
                     _ => note_text,
                 };
                 {
@@ -374,6 +399,71 @@ fn main() -> Result<()> {
                         mouse_hook::MouseEvent::Pressed => PushAction::Press,
                         mouse_hook::MouseEvent::Released => PushAction::Release,
                     });
+                }
+
+                // Drain any pending VAD events. Utterances get routed into
+                // the same send_and_inject pipeline the PTT path uses — the
+                // only difference is who triggered the capture.
+                if let Some(vs) = vad_session.as_ref() {
+                    while let Ok(evt) = vs.rx.try_recv() {
+                        match evt {
+                            audio::VadSessionEvent::Opened { sample_rate } => {
+                                log::info!(
+                                    "VAD session opened at {} Hz",
+                                    sample_rate
+                                );
+                            }
+                            audio::VadSessionEvent::SpeechStart => {
+                                vad_speech_active_loop.store(true, Ordering::SeqCst);
+                            }
+                            audio::VadSessionEvent::Utterance { wav, duration_ms } => {
+                                vad_speech_active_loop.store(false, Ordering::SeqCst);
+                                log::info!(
+                                    "VAD utterance captured: {} bytes ({} ms)",
+                                    wav.len(), duration_ms,
+                                );
+                                let cfg_clone = cfg_loop.clone();
+                                // VAD has no cancel gesture — pass a fresh
+                                // always-false flag so a stale PTT double-tap
+                                // from before a mode-switch can't swallow the
+                                // VAD output.
+                                let cancel_clone = Arc::new(AtomicBool::new(false));
+                                let in_flight_clone = in_flight_loop.clone();
+                                let conn_clone = connection_ok_loop.clone();
+                                let flash_err_clone = flash_error_until_loop.clone();
+                                let note_clone = last_error_note_loop.clone();
+                                in_flight_clone.store(true, Ordering::SeqCst);
+                                thread::spawn(move || {
+                                    let res = send_and_inject(
+                                        wav,
+                                        cfg_clone,
+                                        cancel_clone,
+                                        conn_clone,
+                                        flash_err_clone,
+                                        note_clone,
+                                    );
+                                    in_flight_clone.store(false, Ordering::SeqCst);
+                                    if let Err(e) = res {
+                                        log::error!(
+                                            "VAD transcription pipeline failed: {e:#}"
+                                        );
+                                    }
+                                });
+                            }
+                            audio::VadSessionEvent::Error(msg) => {
+                                log::error!("VAD session error: {}", msg);
+                                *last_error_note_loop.lock().unwrap() = Some((
+                                    Instant::now() + ERROR_NOTE_TTL,
+                                    format!("VAD: {}", msg),
+                                ));
+                                vad_speech_active_loop.store(false, Ordering::SeqCst);
+                            }
+                            audio::VadSessionEvent::Closed => {
+                                log::info!("VAD session closed");
+                                vad_speech_active_loop.store(false, Ordering::SeqCst);
+                            }
+                        }
+                    }
                 }
 
                 for action in actions {
@@ -496,10 +586,24 @@ fn main() -> Result<()> {
                 while let Ok(me) = MenuEvent::receiver().try_recv() {
                     match tray::handle_menu_event(&me, &cfg_loop) {
                         Ok(outcome) => {
+                            if outcome.input_mode_changed {
+                                let snapshot = cfg_loop.lock().unwrap().clone();
+                                apply_input_mode(
+                                    &snapshot,
+                                    &mut binding_manager,
+                                    &mut vad_session,
+                                );
+                            }
                             if outcome.hotkey_changed {
-                                let new_binding = cfg_loop.lock().unwrap().hotkey.binding.clone();
-                                if let Err(e) = binding_manager.apply(&new_binding) {
-                                    log::error!("apply new binding failed: {e:#}");
+                                // Only re-register when we're currently in PTT —
+                                // VAD mode ignores the binding entirely.
+                                let snapshot = cfg_loop.lock().unwrap().clone();
+                                if snapshot.input.mode == InputMode::PushToTalk {
+                                    if let Err(e) =
+                                        binding_manager.apply(&snapshot.hotkey.binding)
+                                    {
+                                        log::error!("apply new binding failed: {e:#}");
+                                    }
                                 }
                             }
                             if outcome.request_capture {
@@ -642,6 +746,39 @@ fn main() -> Result<()> {
             _ => {}
         }
     });
+}
+
+/// Engage exactly one input path — either the global-hotkey / mouse-hook
+/// binding (push-to-talk) or the always-listening VAD session (voice
+/// activation). Tears down the other so their state machines can't race.
+fn apply_input_mode(
+    cfg: &Config,
+    binding_manager: &mut BindingManager,
+    vad_session: &mut Option<audio::VadSession>,
+) {
+    match cfg.input.mode {
+        InputMode::PushToTalk => {
+            if let Some(s) = vad_session.take() {
+                log::info!("Input mode → PTT: stopping VAD session");
+                s.stop();
+            }
+            let binding = cfg.hotkey.binding.clone();
+            if let Err(e) = binding_manager.apply(&binding) {
+                log::error!(
+                    "Input mode → PTT: apply binding '{}' failed: {:#}",
+                    binding, e
+                );
+            }
+        }
+        InputMode::VoiceActivation => {
+            binding_manager.disable();
+            if vad_session.is_none() {
+                log::info!("Input mode → VAD: starting capture + VAD worker");
+                *vad_session =
+                    Some(audio::VadSession::start(cfg.audio.clone(), cfg.vad.clone()));
+            }
+        }
+    }
 }
 
 /// Compose (title, prompt, initial value) for the Win32 text-input popup

@@ -1,11 +1,16 @@
 use std::io::Cursor;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
+use crossbeam_channel::{bounded, Receiver, Sender};
 
-use crate::config::AudioConfig;
+use crate::config::{AudioConfig, VadConfig};
+use crate::vad::{EnergyVad, VadEvent};
 
 pub struct Recorder {
     samples: Arc<Mutex<Vec<i16>>>,
@@ -90,33 +95,40 @@ impl Recorder {
             .into_inner()
             .map_err(|_| anyhow!("samples mutex poisoned"))?;
 
-        let mut mono = if self.channels > 1 {
+        let mono = if self.channels > 1 {
             downmix_to_mono(&samples, self.channels as usize)
         } else {
             samples
         };
-        // Peak-normalize quiet-but-valid speech up to ~-0.9 dBFS so
-        // VibeVoice-ASR sees a consistent loudness profile. Skipped when
-        // peak is already high (don't re-clip) or very low (don't
-        // amplify pure background noise into hallucinations).
-        normalize_peak_i16(&mut mono);
-
-        let mut buf = Cursor::new(Vec::<u8>::with_capacity(mono.len() * 2 + 44));
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: self.sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        {
-            let mut writer = hound::WavWriter::new(&mut buf, spec)?;
-            for s in mono {
-                writer.write_sample(s)?;
-            }
-            writer.finalize()?;
-        }
-        Ok(buf.into_inner())
+        encode_mono_wav(mono, self.sample_rate)
     }
+}
+
+/// Peak-normalize + hound-encode a mono i16 buffer into a WAV byte stream.
+/// Shared by PTT (`Recorder::stop_and_encode_wav`) and voice-activation
+/// (`VadSession` worker) so both pipelines hand identical audio to the ASR.
+pub fn encode_mono_wav(mut mono: Vec<i16>, sample_rate: u32) -> Result<Vec<u8>> {
+    // Peak-normalize quiet-but-valid speech up to ~-0.9 dBFS so VibeVoice-ASR
+    // sees a consistent loudness profile. Skipped when peak is already high
+    // (don't re-clip) or very low (don't amplify pure background noise into
+    // hallucinations).
+    normalize_peak_i16(&mut mono);
+
+    let mut buf = Cursor::new(Vec::<u8>::with_capacity(mono.len() * 2 + 44));
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    {
+        let mut writer = hound::WavWriter::new(&mut buf, spec)?;
+        for s in mono {
+            writer.write_sample(s)?;
+        }
+        writer.finalize()?;
+    }
+    Ok(buf.into_inner())
 }
 
 pub fn list_input_devices() -> Vec<String> {
@@ -196,4 +208,196 @@ fn downmix_to_mono(samples: &[i16], channels: usize) -> Vec<i16> {
         out.push((sum / channels as i32) as i16);
     }
     out
+}
+
+/// Event surfaced to `main.rs` by the VAD worker thread. The worker keeps
+/// the `cpal::Stream` alive (it's `!Send`, so we can't hand it off) and
+/// emits either status pings (Opened / Closed) or a fully-encoded WAV
+/// ready for `openai::SttClient::transcribe`.
+#[derive(Debug)]
+pub enum VadSessionEvent {
+    /// The capture stream started successfully. Useful for the tray to
+    /// flip to "listening" state, and for the main loop to know the mic
+    /// is actually hot.
+    Opened { sample_rate: u32 },
+    /// Endpoint detected — here's the encoded WAV. Hand straight to the
+    /// existing `send_and_inject` path.
+    Utterance { wav: Vec<u8>, duration_ms: u64 },
+    /// Brief "speech started" indicator, for tray green-flash while VAD
+    /// is running. Not required for correctness.
+    SpeechStart,
+    /// Capture or device init failed. Carries a short diagnostic; the
+    /// worker thread exits after emitting this.
+    Error(String),
+    /// Normal shutdown acknowledgement.
+    Closed,
+}
+
+/// Handle to the VAD capture worker. Drop or call `stop()` to tear it
+/// down; the worker's cpal::Stream is freed as the thread returns.
+pub struct VadSession {
+    shutdown: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+    pub rx: Receiver<VadSessionEvent>,
+}
+
+impl VadSession {
+    pub fn start(audio_cfg: AudioConfig, vad_cfg: VadConfig) -> Self {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_thread = shutdown.clone();
+        // Small capacity — we just need to buffer ~1 second of events.
+        // Utterance WAVs are the only heavy payload and they drop straight
+        // into the receiver.
+        let (evt_tx, evt_rx) = bounded::<VadSessionEvent>(16);
+        let evt_tx_run = evt_tx.clone();
+        let thread = thread::spawn(move || {
+            if let Err(e) = vad_worker(audio_cfg, vad_cfg, shutdown_thread, evt_tx_run.clone()) {
+                let _ = evt_tx_run.send(VadSessionEvent::Error(format!("{:#}", e)));
+            }
+            let _ = evt_tx_run.send(VadSessionEvent::Closed);
+        });
+        Self {
+            shutdown,
+            thread: Some(thread),
+            rx: evt_rx,
+        }
+    }
+
+    pub fn stop(mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for VadSession {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+fn vad_worker(
+    audio_cfg: AudioConfig,
+    vad_cfg: VadConfig,
+    shutdown: Arc<AtomicBool>,
+    evt_tx: Sender<VadSessionEvent>,
+) -> Result<()> {
+    let host = cpal::default_host();
+    let device = pick_input_device(&host, &audio_cfg.mic_device)?;
+    log::info!("VAD input device: {}", device.name().unwrap_or_default());
+
+    let default_cfg = device
+        .default_input_config()
+        .context("default_input_config")?;
+    let sample_format = default_cfg.sample_format();
+    let channels = default_cfg.channels();
+    let sample_rate = default_cfg.sample_rate().0;
+    let stream_cfg: StreamConfig = default_cfg.into();
+
+    // cpal delivers audio on its own callback thread. We don't run the VAD
+    // there — the callback must stay short — so we pipe raw (interleaved)
+    // samples through a bounded channel to the worker body below.
+    let (sample_tx, sample_rx) = bounded::<Vec<i16>>(32);
+    let err_cb = |e| log::error!("VAD audio stream error: {e:?}");
+
+    let stream = match sample_format {
+        SampleFormat::F32 => device.build_input_stream(
+            &stream_cfg,
+            {
+                let sample_tx = sample_tx.clone();
+                move |data: &[f32], _| {
+                    let mut chunk = Vec::with_capacity(data.len());
+                    for &s in data {
+                        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                        chunk.push(v);
+                    }
+                    let _ = sample_tx.try_send(chunk);
+                }
+            },
+            err_cb,
+            None,
+        ),
+        SampleFormat::I16 => device.build_input_stream(
+            &stream_cfg,
+            {
+                let sample_tx = sample_tx.clone();
+                move |data: &[i16], _| {
+                    let _ = sample_tx.try_send(data.to_vec());
+                }
+            },
+            err_cb,
+            None,
+        ),
+        SampleFormat::U16 => device.build_input_stream(
+            &stream_cfg,
+            {
+                let sample_tx = sample_tx.clone();
+                move |data: &[u16], _| {
+                    let mut chunk = Vec::with_capacity(data.len());
+                    for &s in data {
+                        let v = (s as i32 - 32768) as i16;
+                        chunk.push(v);
+                    }
+                    let _ = sample_tx.try_send(chunk);
+                }
+            },
+            err_cb,
+            None,
+        ),
+        other => return Err(anyhow!("Unsupported sample format: {:?}", other)),
+    }
+    .context("build_input_stream (vad)")?;
+    stream.play().context("stream.play (vad)")?;
+    drop(sample_tx); // The only remaining sender is inside the stream callback.
+
+    let _ = evt_tx.send(VadSessionEvent::Opened { sample_rate });
+
+    let mut vad = EnergyVad::new(vad_cfg, sample_rate);
+    let ch = channels as usize;
+    while !shutdown.load(Ordering::SeqCst) {
+        let interleaved = match sample_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(v) => v,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                log::warn!("VAD sample channel closed unexpectedly");
+                break;
+            }
+        };
+        let mono: Vec<i16> = if ch > 1 {
+            downmix_to_mono(&interleaved, ch)
+        } else {
+            interleaved
+        };
+        for event in vad.push(&mono) {
+            match event {
+                VadEvent::Nothing => {}
+                VadEvent::SpeechStart => {
+                    let _ = evt_tx.try_send(VadSessionEvent::SpeechStart);
+                }
+                VadEvent::SpeechEnd { samples } => {
+                    let duration_ms = (samples.len() as u64 * 1000) / sample_rate as u64;
+                    match encode_mono_wav(samples, sample_rate) {
+                        Ok(wav) => {
+                            let _ = evt_tx.send(VadSessionEvent::Utterance {
+                                wav,
+                                duration_ms,
+                            });
+                        }
+                        Err(e) => {
+                            log::error!("VAD wav encode failed: {e:#}");
+                            let _ = evt_tx.send(VadSessionEvent::Error(format!(
+                                "encode wav: {e:#}"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    drop(stream);
+    Ok(())
 }

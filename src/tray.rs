@@ -8,7 +8,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::audio;
 use crate::autostart;
-use crate::config::{Config, OutputMode, HOTKEY_OPTIONS};
+use crate::config::{Config, InputMode, OutputMode, HOTKEY_OPTIONS};
 
 // Stable menu IDs. Using prefixed strings instead of opaque generated IDs lets us
 // keep the menu rebuildable without storing every MenuItem handle in shared state.
@@ -34,6 +34,8 @@ const ID_SRV_URL: &str = "vd:srv:url";
 const ID_SRV_KEY: &str = "vd:srv:key";
 const ID_SRV_MODEL: &str = "vd:srv:model";
 const ID_SRV_CA: &str = "vd:srv:ca";
+const ID_MODE_PTT: &str = "vd:mode:ptt";
+const ID_MODE_VAD: &str = "vd:mode:vad";
 
 /// Language presets shown as rubber-stamp options in the tray. Anything else
 /// goes via the Custom… text-input dialog. Order mirrors VibeVoice-ASR's
@@ -117,6 +119,10 @@ pub enum TrayStatus {
     Idle,
     /// Actively capturing audio (green).
     Recording,
+    /// Voice-activation mode is armed and listening but not speaking
+    /// (teal). Distinct from Idle so the user sees at a glance that the
+    /// mic is actually hot in VAD mode.
+    VadListening,
     /// Audio sent, waiting on server response (orange).
     Processing,
     /// Heartbeat / last request failed with a connection issue (gray).
@@ -145,6 +151,10 @@ pub fn apply_status(
         TrayStatus::Recording => (
             indicator_icon(60, 180, 80)?,
             "vibe-dictate — recording… release to send".to_string(),
+        ),
+        TrayStatus::VadListening => (
+            indicator_icon(40, 180, 180)?,
+            "vibe-dictate — listening (voice activation)".to_string(),
         ),
         TrayStatus::Processing => (
             indicator_icon(230, 160, 30)?,
@@ -192,6 +202,33 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
     let reload = MenuItem::with_id(MenuId::new(ID_RELOAD), "Reload config", true, None);
     menu.append(&reload)?;
     menu.append(&PredefinedMenuItem::separator())?;
+
+    // Input mode — radio pick between classic push-to-talk (hotkey/mouse
+    // drives the recording) and voice activation (mic stays hot, an energy
+    // VAD opens/closes utterances automatically). Mutually exclusive by
+    // design; main.rs tears down the other mode on switch.
+    let mode_label = match cfg.input.mode {
+        InputMode::PushToTalk => "Input: Push-to-talk",
+        InputMode::VoiceActivation => "Input: Voice activation",
+    };
+    let mode_sub = Submenu::new(mode_label, true);
+    let mode_ptt = CheckMenuItem::with_id(
+        MenuId::new(ID_MODE_PTT),
+        "Push-to-talk (hold hotkey)",
+        true,
+        cfg.input.mode == InputMode::PushToTalk,
+        None,
+    );
+    let mode_vad = CheckMenuItem::with_id(
+        MenuId::new(ID_MODE_VAD),
+        "Voice activation (always-listening VAD)",
+        true,
+        cfg.input.mode == InputMode::VoiceActivation,
+        None,
+    );
+    mode_sub.append(&mode_ptt)?;
+    mode_sub.append(&mode_vad)?;
+    menu.append(&mode_sub)?;
 
     // Hotkey submenu — F-keys + Pause/ScrollLock; Alt-based bindings intentionally
     // omitted (they collide with Windows app menus / AltGr stuck-key issues).
@@ -525,6 +562,10 @@ pub struct MenuOutcome {
     /// Some(field) → main should open the Win32 text-input popup for that
     /// config field (URL, token, language, etc.). None → nothing to do.
     pub text_input_request: Option<TextField>,
+    /// Set when the user switched between PTT and VAD. Main has to tear
+    /// down the current input path and bring up the other — the two are
+    /// mutually exclusive, so the routing is all-or-nothing.
+    pub input_mode_changed: bool,
 }
 
 pub fn handle_menu_event(
@@ -539,6 +580,7 @@ pub fn handle_menu_event(
         *cfg.lock().unwrap() = reloaded;
         log::info!("Config reloaded from disk");
         outcome.hotkey_changed = true;
+        outcome.input_mode_changed = true;
         outcome.menu_dirty = true;
     } else if id == ID_AUTOSTART {
         let new_val = !cfg.lock().unwrap().startup.autostart;
@@ -656,6 +698,24 @@ pub fn handle_menu_event(
         outcome.text_input_request = Some(TextField::ServerModel);
     } else if id == ID_SRV_CA {
         outcome.text_input_request = Some(TextField::ServerCaCert);
+    } else if id == ID_MODE_PTT {
+        let mut c = cfg.lock().unwrap();
+        if c.input.mode != InputMode::PushToTalk {
+            c.input.mode = InputMode::PushToTalk;
+            c.save()?;
+            log::info!("Input mode: Push-to-talk");
+            outcome.input_mode_changed = true;
+        }
+        outcome.menu_dirty = true;
+    } else if id == ID_MODE_VAD {
+        let mut c = cfg.lock().unwrap();
+        if c.input.mode != InputMode::VoiceActivation {
+            c.input.mode = InputMode::VoiceActivation;
+            c.save()?;
+            log::info!("Input mode: Voice activation");
+            outcome.input_mode_changed = true;
+        }
+        outcome.menu_dirty = true;
     }
     Ok(outcome)
 }

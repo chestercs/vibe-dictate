@@ -19,6 +19,10 @@ pub struct Config {
     #[serde(default)]
     pub hotkey: HotkeyConfig,
     #[serde(default)]
+    pub input: InputConfig,
+    #[serde(default)]
+    pub vad: VadConfig,
+    #[serde(default)]
     pub output: OutputConfig,
     #[serde(default)]
     pub startup: StartupConfig,
@@ -151,6 +155,84 @@ impl Default for HotkeyConfig {
 pub const HOTKEY_OPTIONS: &[&str] =
     &["F7", "F8", "F9", "F10", "F11", "F12", "Pause", "ScrollLock"];
 
+/// Toggle between push-to-talk (hold hotkey/mouse button) and voice
+/// activation (continuous mic listening with an RMS-based VAD). The
+/// two modes are mutually exclusive — the current binding is wired to
+/// exactly one of them at a time.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InputMode {
+    PushToTalk,
+    VoiceActivation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputConfig {
+    pub mode: InputMode,
+}
+
+impl Default for InputConfig {
+    fn default() -> Self {
+        Self {
+            mode: InputMode::PushToTalk,
+        }
+    }
+}
+
+/// Energy-based VAD tuning. Defaults target close-mic dictation at 16 kHz;
+/// the adaptive noise floor tracks background noise between utterances
+/// and speech_ratio is the SNR multiplier over that floor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VadConfig {
+    /// How many consecutive speech frames (20 ms each) must be above
+    /// threshold before we open a new utterance. Too low = false starts
+    /// on door slams; too high = clipped beginnings.
+    #[serde(default = "default_vad_start_frames")]
+    pub start_frames: u32,
+    /// How many consecutive silence frames (20 ms each) close the
+    /// current utterance. 35 × 20 ms = 700 ms of silence is the classic
+    /// dictation endpoint.
+    #[serde(default = "default_vad_end_frames")]
+    pub end_frames: u32,
+    /// Max utterance length in seconds. Caps runaway captures when a
+    /// loud TV or fan fools the VAD.
+    #[serde(default = "default_vad_max_seconds")]
+    pub max_seconds: u32,
+    /// Minimum utterance length in milliseconds. Anything shorter is
+    /// discarded (pops, coughs, hotkey clicks).
+    #[serde(default = "default_vad_min_utt_ms")]
+    pub min_utterance_ms: u32,
+    /// Linear RMS ratio over the noise floor that counts as speech.
+    /// 3.0 ≈ +9.5 dB SNR — safe for close-mic dictation.
+    #[serde(default = "default_vad_speech_ratio")]
+    pub speech_ratio: f32,
+    /// Absolute floor for the noise estimate in i16 RMS units so the
+    /// VAD doesn't start triggering on pure digital noise during truly
+    /// silent periods.
+    #[serde(default = "default_vad_noise_floor_min")]
+    pub noise_floor_min: f32,
+}
+
+fn default_vad_start_frames() -> u32 { 3 }
+fn default_vad_end_frames() -> u32 { 35 }
+fn default_vad_max_seconds() -> u32 { 30 }
+fn default_vad_min_utt_ms() -> u32 { 300 }
+fn default_vad_speech_ratio() -> f32 { 3.0 }
+fn default_vad_noise_floor_min() -> f32 { 80.0 }
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            start_frames: default_vad_start_frames(),
+            end_frames: default_vad_end_frames(),
+            max_seconds: default_vad_max_seconds(),
+            min_utterance_ms: default_vad_min_utt_ms(),
+            speech_ratio: default_vad_speech_ratio(),
+            noise_floor_min: default_vad_noise_floor_min(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputConfig {
     pub mode: OutputMode,
@@ -219,6 +301,8 @@ impl Default for Config {
             stt: SttConfig::default(),
             audio: AudioConfig::default(),
             hotkey: HotkeyConfig::default(),
+            input: InputConfig::default(),
+            vad: VadConfig::default(),
             output: OutputConfig::default(),
             startup: StartupConfig::default(),
         }
