@@ -134,7 +134,21 @@ pub struct OutputConfig {
     /// newline appended to dictated text.
     #[serde(default)]
     pub send_enter: bool,
+    /// Milliseconds to sleep between successive characters in SendInput
+    /// mode. Too fast and Electron/Chromium apps (Discord, Slack, VS Code)
+    /// and some terminals silently drop characters; too slow and dictation
+    /// feels sluggish. 5 ms ≈ 200 chars/sec is a safe middle ground but
+    /// Notepad on slower machines sometimes needs 10-20 ms.
+    #[serde(default = "default_send_key_delay_ms")]
+    pub send_key_delay_ms: u64,
+    /// Milliseconds to hold each key "down" before releasing (down→up gap
+    /// per character). Usually 0 is fine; bump to 5-10 ms for a handful of
+    /// legacy apps that filter out keypresses with zero duration.
+    #[serde(default)]
+    pub send_key_down_delay_ms: u64,
 }
+
+fn default_send_key_delay_ms() -> u64 { 5 }
 
 impl Default for OutputConfig {
     fn default() -> Self {
@@ -142,6 +156,8 @@ impl Default for OutputConfig {
             mode: OutputMode::Clipboard,
             trailing_space: true,
             send_enter: false,
+            send_key_delay_ms: default_send_key_delay_ms(),
+            send_key_down_delay_ms: 0,
         }
     }
 }

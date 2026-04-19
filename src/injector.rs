@@ -22,49 +22,65 @@ pub fn clipboard_paste(text: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn send_input_text(text: &str) -> Result<()> {
-    // Build the full event list up-front (down+up per UTF-16 code unit) so the
-    // foreground app receives coherent bursts instead of hundreds of tiny
-    // SendInput calls racing with its message pump. Some apps (browsers,
-    // terminals) drop injected events when hammered one by one.
-    let mut inputs: Vec<INPUT> = Vec::with_capacity(text.encode_utf16().count() * 2);
-    for ch in text.encode_utf16() {
-        inputs.push(make_unicode_input(ch, false));
-        inputs.push(make_unicode_input(ch, true));
-    }
-    if inputs.is_empty() {
-        return Ok(());
-    }
-
+/// Per-character SendInput with configurable pacing. Windows accepts a
+/// big batched burst happily (`SendInput(&[42 events])` returns 42) but
+/// many target apps — Electron/Chromium (Discord, Slack, VS Code), some
+/// terminals, Notepad on slower machines — can't drain their message
+/// queue fast enough and silently drop characters. Pacing via
+/// `key_delay_ms` (sleep between chars) and `key_down_delay_ms` (hold
+/// duration for each key) fixes this; defaults are 5 / 0.
+pub fn send_input_text(text: &str, key_delay_ms: u64, key_down_delay_ms: u64) -> Result<()> {
     let cbsize = std::mem::size_of::<INPUT>() as i32;
-    let total = inputs.len();
-    // 100 events per chunk is a conservative safe size; it also gives the
-    // target window a chance to drain between chunks for long dictations.
-    let mut sent: u32 = 0;
-    for chunk in inputs.chunks(100) {
-        let n = unsafe { SendInput(chunk, cbsize) };
-        sent += n;
-        if (n as usize) < chunk.len() {
+    let mut total_events: usize = 0;
+    let mut sent_events: u32 = 0;
+    let char_count = text.chars().count();
+
+    for ch in text.encode_utf16() {
+        // Send key-down and key-up separately so the caller can insert a
+        // hold-duration between them. Most apps don't care, but a few
+        // legacy targets filter zero-duration presses.
+        let down = [make_unicode_input(ch, false)];
+        total_events += 1;
+        let n_down = unsafe { SendInput(&down, cbsize) };
+        sent_events += n_down;
+        if (n_down as usize) < down.len() {
             let err = unsafe { GetLastError() };
             log::warn!(
-                "SendInput partial: {}/{} events sent (last error: {:?}) — \
+                "SendInput down partial on U+{:04X}: {}/{} (err {:?}) — \
                  focused window may block injected input (UIPI, admin, game)",
-                n,
-                chunk.len(),
+                ch,
+                n_down,
+                down.len(),
                 err
             );
-            // Don't continue into the next chunk — whatever's blocking us will
-            // block that too, and we'd produce garbled partial output.
             break;
         }
-        thread::sleep(Duration::from_millis(1));
+        if key_down_delay_ms > 0 {
+            thread::sleep(Duration::from_millis(key_down_delay_ms));
+        }
+
+        let up = [make_unicode_input(ch, true)];
+        total_events += 1;
+        let n_up = unsafe { SendInput(&up, cbsize) };
+        sent_events += n_up;
+        if (n_up as usize) < up.len() {
+            let err = unsafe { GetLastError() };
+            log::warn!("SendInput up partial on U+{:04X}: {}/{} (err {:?})", ch, n_up, up.len(), err);
+            break;
+        }
+
+        if key_delay_ms > 0 {
+            thread::sleep(Duration::from_millis(key_delay_ms));
+        }
     }
 
     log::info!(
-        "SendInput typed {} chars ({}/{} events delivered)",
-        text.chars().count(),
-        sent,
-        total
+        "SendInput typed {} chars ({}/{} events delivered, key_delay={}ms, key_down_delay={}ms)",
+        char_count,
+        sent_events,
+        total_events,
+        key_delay_ms,
+        key_down_delay_ms,
     );
     Ok(())
 }

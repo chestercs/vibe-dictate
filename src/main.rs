@@ -662,7 +662,11 @@ fn send_and_inject(
 
     match output_cfg.mode {
         OutputMode::Clipboard => injector::clipboard_paste(&out)?,
-        OutputMode::Sendinput => injector::send_input_text(&out)?,
+        OutputMode::Sendinput => injector::send_input_text(
+            &out,
+            output_cfg.send_key_delay_ms,
+            output_cfg.send_key_down_delay_ms,
+        )?,
     }
     if output_cfg.send_enter {
         injector::send_enter()?;

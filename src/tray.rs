@@ -288,22 +288,33 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
     );
     menu.append(&autostart_item)?;
 
+    // Output mode is a one-of-two pick, so grouping the radio-style options
+    // inside their own submenu makes the mutual exclusion visually obvious —
+    // flat CheckMenuItems at the root looked like independent toggles.
+    let output_sub = Submenu::new(
+        match cfg.output.mode {
+            OutputMode::Clipboard => "Output mode: Clipboard",
+            OutputMode::Sendinput => "Output mode: SendInput",
+        },
+        true,
+    );
     let mode_clipboard = CheckMenuItem::with_id(
         MenuId::new(ID_OUT_CLIPBOARD),
-        "Output: Clipboard + Ctrl+V",
+        "Clipboard + Ctrl+V",
         true,
         cfg.output.mode == OutputMode::Clipboard,
         None,
     );
     let mode_sendinput = CheckMenuItem::with_id(
         MenuId::new(ID_OUT_SENDINPUT),
-        "Output: SendInput (direct typing)",
+        "SendInput (direct typing)",
         true,
         cfg.output.mode == OutputMode::Sendinput,
         None,
     );
-    menu.append(&mode_clipboard)?;
-    menu.append(&mode_sendinput)?;
+    output_sub.append(&mode_clipboard)?;
+    output_sub.append(&mode_sendinput)?;
+    menu.append(&output_sub)?;
 
     let send_enter = CheckMenuItem::with_id(
         MenuId::new(ID_OUT_SEND_ENTER),
