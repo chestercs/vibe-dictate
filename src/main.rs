@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(400);
 
 /// Max gap between the previous Release and a fresh Press that still
-/// counts as "cancel the in-flight transcription". Covers the common case
-/// where the user released, saw the orange tray / realized it's wrong,
-/// and slapped the key again to take it back. Widely enough above
-/// DOUBLE_TAP_WINDOW that a deliberate rapid second dictation (>500ms
-/// after release) isn't swallowed as cancel.
-const PROCESSING_CANCEL_WINDOW: Duration = Duration::from_millis(500);
+/// counts as "cancel the in-flight transcription". Covers "oh wait, take
+/// that back": user release → sees the orange tray → hits the key again.
+/// Human visual reaction time is 300-500ms, but a looser window (1.2 s)
+/// is still tight enough that normal back-to-back dictations (>1.5 s
+/// between release and the next press) don't get swallowed as cancels.
+const PROCESSING_CANCEL_WINDOW: Duration = Duration::from_millis(1200);
 
 /// How long the red "cancelled" icon stays up after a double-tap before
 /// snapping back to idle blue. Short and sharp — the user wants a quick
@@ -517,6 +517,38 @@ fn main() -> Result<()> {
                                 );
                                 *flash_until_loop.lock().unwrap() =
                                     Some(Instant::now() + CANCEL_FLASH_DURATION);
+                            } else if currently_in_flight && !currently_recording {
+                                // Close-but-no-cigar: press landed while a
+                                // transcription was still running, but the
+                                // release→press gap was over the cancel
+                                // window. Log it so we can tell whether the
+                                // user is missing the gesture or whether the
+                                // window is set too tight.
+                                if let Some(t) = last_release {
+                                    log::info!(
+                                        "Press during in-flight transcription ({} ms after release, > {} ms cancel window) — starting new recording",
+                                        now.duration_since(t).as_millis(),
+                                        PROCESSING_CANCEL_WINDOW.as_millis(),
+                                    );
+                                }
+                                // Fall through to the "new session" branch.
+                                let mut slot = recorder_loop.lock().unwrap();
+                                if slot.is_none() {
+                                    cancel_flag_loop.store(false, Ordering::SeqCst);
+                                    *flash_until_loop.lock().unwrap() = None;
+                                    let audio_cfg = cfg_loop.lock().unwrap().audio.clone();
+                                    match audio::Recorder::start(&audio_cfg) {
+                                        Ok(r) => {
+                                            log::info!("Recording started");
+                                            *slot = Some(r);
+                                            *press_time_loop.lock().unwrap() =
+                                                Some(Instant::now());
+                                        }
+                                        Err(e) => {
+                                            log::error!("Failed to start recording: {e:#}")
+                                        }
+                                    }
+                                }
                             } else if is_double_tap && currently_recording {
                                 // Classic in-recording cancel (rec still live).
                                 cancel_flag_loop.store(true, Ordering::SeqCst);
