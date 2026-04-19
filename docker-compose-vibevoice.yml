@@ -17,9 +17,9 @@
 #  you keep VibeVoice at a shared path instead of inside vibe-dictate).
 #
 #  Services:
-#    docker compose up -d                      # Gradio ASR on :7860 (default)
+#    docker compose up -d                      # OpenAI-compat ASR on :8080 (default)
+#    docker compose --profile gradio up -d     # also Gradio ASR demo on :7860
 #    docker compose --profile realtime up -d   # also realtime TTS on :3001
-#    docker compose --profile openai up -d     # also OpenAI-compat ASR on :8080
 # ============================================================================
 
 services:
@@ -27,6 +27,7 @@ services:
   vibevoice-asr:
     image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}
     container_name: vibevoice-asr
+    profiles: ["gradio"]
     restart: unless-stopped
     tty: true
     ipc: host
@@ -129,7 +130,6 @@ services:
   vibevoice-asr-openai:
     image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}
     container_name: vibevoice-asr-openai
-    profiles: ["openai"]
     restart: unless-stopped
     tty: true
     ipc: host

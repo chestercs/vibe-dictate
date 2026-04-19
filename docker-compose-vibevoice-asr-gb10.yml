@@ -8,14 +8,14 @@
 #    docker compose up -d                  # COMPOSE_FILE is set in .env
 #
 #  Default `up -d` brings:
-#    vibevoice-asr         (port 7860, Gradio UI, Hungarian STT)
+#    vibevoice-asr-openai   (port 8080, OpenAI-compat /v1/audio/transcriptions)
 #    vibevoice-realtime-tts (port 3000, WebSocket, English only)
 #  Combined VRAM ~18 GB — fits in the ~20 GB left by Gemma.
 #
-#  Experimental profiles:
+#  Experimental / opt-in profiles:
+#    docker compose --profile gradio up vibevoice-asr          # legacy Gradio demo
 #    docker compose --profile vllm up vibevoice-vllm-asr
 #    docker compose --profile openai-tts up vibevoice-openai-tts
-#    docker compose --profile openai up vibevoice-asr-openai
 #
 #  Default path: runtime-install (A-opció) using NVIDIA's prebuilt image.
 #  First boot runs scripts/vibevoice_entrypoint.sh, which pip-installs
@@ -43,6 +43,7 @@ services:
     image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.12-py3}
     container_name: vibevoice-asr
     hostname: vibevoice-asr
+    profiles: ["gradio"]
     restart: unless-stopped
     tty: true
     ipc: host
@@ -287,7 +288,6 @@ services:
     image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.12-py3}
     container_name: vibevoice-asr-openai
     hostname: vibevoice-asr-openai
-    profiles: ["openai"]
     restart: unless-stopped
     tty: true
     ipc: host
