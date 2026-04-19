@@ -2,12 +2,15 @@
 
 ![vibe-dictate tray menu](assets/tray-menu.png)
 
-A Windows tray-resident push-to-talk dictation tool that talks to any
+A Windows tray-resident dictation tool that talks to any
 **OpenAI-compatible** speech-to-text server — most notably Microsoft's
 **VibeVoice ASR**, but also OpenAI Whisper itself, self-hosted Whisper
 /vLLM deployments, and anything else that speaks
 `POST /v1/audio/transcriptions`. Hold a hotkey, speak, release — the
-transcription lands in whatever window has focus.
+transcription lands in whatever window has focus. Or flip it into
+**voice-activation mode** and let the built-in VAD slice your speech
+into utterances automatically; the hotkey then becomes an "undo the
+last thing it picked up" button.
 
 Built for Hungarian dictation but works in any of the 50+ languages
 VibeVoice-ASR supports. Multilingual by accident of the backend; Hungarian
@@ -275,11 +278,16 @@ launch in `notepad.exe`).
    preset or `Rebind…` and press the combination you want.
 3. **Microphone**: tray → Microphone → pick a device, or leave on
    `(System default)`.
-4. **Hold-to-talk**: hold the hotkey, speak, release. Tray icon turns
-   green while recording. Transcription should appear in the focused
-   window 1-3 seconds after release.
-5. **Cancel**: double-tap the hotkey within 400ms while recording — the
-   tray flashes red and the buffered audio is dropped without sending.
+4. **Input mode**: default is push-to-talk. Tray → Input → Voice
+   activation flips the mic to always-on with VAD-based utterance
+   slicing (useful for long-form dictation).
+5. **Hold-to-talk** (PTT mode): hold the hotkey, speak, release. Tray
+   icon turns green while recording. Transcription should appear in
+   the focused window 1-3 seconds after release.
+6. **Cancel**: double-tap the hotkey within 400 ms while recording,
+   or single-press shortly after release to drop the in-flight
+   transcription. In voice-activation mode the hotkey cancels
+   whatever VAD just captured (or is still processing).
 
 ---
 
@@ -308,12 +316,27 @@ sample_rate = 16000     # VibeVoice expects 16 kHz mono
 [hotkey]
 binding = "F8"          # see "Hotkey reference" below
 
+[input]
+mode = "push_to_talk"   # "push_to_talk" or "voice_activation"
+                        # voice_activation = the mic stays hot; energy-based
+                        # VAD chops speech into utterances and sends each
+                        # one on its own. In that mode the hotkey binding
+                        # above becomes a cancel-in-flight button.
+
+[vad]
+start_frames     = 3    # consecutive 20 ms frames of speech needed to open an utterance
+end_frames       = 35   # consecutive 20 ms frames of silence that close it (≈ 700 ms)
+max_seconds      = 30   # hard cap — utterance auto-closes regardless of silence
+min_utterance_ms = 300  # drop utterances shorter than this (typing noise, throat clears)
+speech_ratio     = 3.0  # RMS must exceed noise_floor × this to count as speech (~+9.5 dB SNR)
+noise_floor_min  = 80.0 # absolute floor on the adaptive noise estimate
+
 [output]
 mode                    = "clipboard"  # "clipboard" or "sendinput"
 trailing_space          = true         # append " " after transcription (helps when chaining utterances)
 send_enter              = false        # press Enter after the text — useful in chat clients / terminals
 send_key_delay_ms       = 20           # SendInput: ms sleep between characters; safe default, lower for faster typing on well-behaved editors
-send_key_down_delay_ms  = 0            # SendInput: ms to hold each key "down" (raise for legacy apps that filter zero-duration presses)
+send_key_down_delay_ms  = 10           # SendInput: ms to hold each key "down" (some apps filter zero-duration presses; 10 ms is reliable & imperceptible)
 
 [startup]
 autostart       = false   # add to HKCU\...\Run on next save
@@ -385,6 +408,12 @@ Right-click the tray icon to get:
 
 - **Reload config** — re-reads `config.toml` from disk; useful after
   hand-edits or for picking up changes from other tools.
+- **Input: Push-to-talk / Voice activation** — picks between the two
+  modes. Push-to-talk is the default: the hotkey opens the mic while
+  held. Voice activation keeps the mic always on and uses an internal
+  energy-based VAD to slice speech into utterances; the hotkey then
+  doubles as a cancel button for whatever the VAD just captured or is
+  still processing.
 - **Hotkey** — submenu with preset bindings (F7-F12, Pause, ScrollLock)
   + `Rebind…` (Win32 capture popup that accepts any key/mouse +
   modifiers). The active binding is checked. Custom captured bindings
@@ -430,7 +459,9 @@ custom paste handlers may behave unexpectedly.
 Injects each UTF-16 code unit as a `KEYEVENTF_UNICODE` keystroke via the
 Win32 `SendInput` API, paced by `output.send_key_delay_ms` between
 characters (default 20 ms ≈ 50 chars/sec — safe for Electron, Notepad,
-and most terminals). Errors and partial deliveries are logged.
+and most terminals) and `output.send_key_down_delay_ms` as the per-key
+hold time (default 10 ms — imperceptible, but several apps drop
+zero-duration presses). Errors and partial deliveries are logged.
 
 Pros: no clipboard side-effects, clean for chat clients and terminals.
 
