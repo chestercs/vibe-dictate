@@ -69,10 +69,12 @@ cert lehet — reqwest rustls-sel bundlekezeli.
 - [x] Global hotkey (config-ból)
 - [x] Mic capture (WASAPI, cpal)
 - [x] Gradio HTTP: upload + call + SSE result
-- [x] Clipboard + Ctrl+V output
+- [x] Clipboard + Ctrl+V output (default)
+- [x] SendInput direct-typing output (tray-ből választható, batch + error log)
 - [x] Hotkey átkonfigurálás UI-ból (tray → Hotkey → Rebind…)
 - [x] Mouse3/4/5 push-to-talk (Win32 WH_MOUSE_LL hook)
 - [x] Autostart toggle (tray menü)
 - [x] Mic picker (tray menü)
-- [ ] SendInput output (config-ban választható, de v0.1-ben clipboard a default)
-- [ ] Settings ablak
+- [x] Gradio URL / token / CA cert szerkesztés tray-ből (Win32 popup)
+- [x] Language hint + context info + max_tokens preset/custom (tray)
+- [x] Open config file / Open log file (tray → notepad)
