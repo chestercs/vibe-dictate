@@ -346,6 +346,7 @@ fn main() -> Result<()> {
                 };
                 let recording = recorder_loop.lock().unwrap().is_some();
                 let vad_speaking = vad_speech_active_loop.load(Ordering::SeqCst);
+                let cancel_pending = cancel_flag_loop.load(Ordering::SeqCst);
                 let processing = !recording
                     && !vad_speaking
                     && in_flight_loop.load(Ordering::SeqCst);
@@ -355,9 +356,12 @@ fn main() -> Result<()> {
                     c.input.mode == InputMode::VoiceActivation
                 };
 
+                // If a cancel is still pending on an in-flight transcription,
+                // keep the red flash instead of briefly flipping to yellow
+                // "Processing" between flash expiry and the HTTP response.
                 let desired = if flash_error {
                     tray::TrayStatus::ErrorFlash
-                } else if flash_cancel {
+                } else if flash_cancel || (cancel_pending && processing) {
                     tray::TrayStatus::CancelFlash
                 } else if recording || vad_speaking {
                     tray::TrayStatus::Recording
