@@ -135,10 +135,11 @@ pub struct OutputConfig {
     #[serde(default)]
     pub send_enter: bool,
     /// Milliseconds to sleep between successive characters in SendInput
-    /// mode. Too fast and Electron/Chromium apps (Discord, Slack, VS Code)
-    /// and some terminals silently drop characters; too slow and dictation
-    /// feels sluggish. 5 ms ≈ 200 chars/sec is a safe middle ground but
-    /// Notepad on slower machines sometimes needs 10-20 ms.
+    /// mode. Too fast and Electron/Chromium apps (Discord, Slack, VS Code),
+    /// Notepad, and some terminals silently drop characters; too slow and
+    /// dictation feels sluggish. 20 ms ≈ 50 chars/sec is the safe default
+    /// that works even on slower CPUs; drop to 5-10 ms on fast machines
+    /// into well-behaved editors if you want faster injection.
     #[serde(default = "default_send_key_delay_ms")]
     pub send_key_delay_ms: u64,
     /// Milliseconds to hold each key "down" before releasing (down→up gap
@@ -148,7 +149,7 @@ pub struct OutputConfig {
     pub send_key_down_delay_ms: u64,
 }
 
-fn default_send_key_delay_ms() -> u64 { 5 }
+fn default_send_key_delay_ms() -> u64 { 20 }
 
 impl Default for OutputConfig {
     fn default() -> Self {

@@ -66,10 +66,10 @@ pub const MAXTOK_OPTIONS: &[(&str, u32)] = &[
 /// bump to 15-30 ms for those. 0 ms = burst mode (fastest, least reliable).
 pub const SEND_DELAY_OPTIONS: &[(&str, u64)] = &[
     ("0 ms (burst, fastest)", 0),
-    ("5 ms (default)", 5),
+    ("5 ms", 5),
     ("10 ms", 10),
     ("15 ms", 15),
-    ("20 ms", 20),
+    ("20 ms (default, safe)", 20),
     ("30 ms", 30),
     ("50 ms (very slow, safest)", 50),
 ];
@@ -342,13 +342,15 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
     output_sub.append(&mode_sendinput)?;
     menu.append(&output_sub)?;
 
-    // SendInput pacing presets — only meaningful when mode=SendInput, but
-    // we show them unconditionally so switching modes doesn't reshuffle
-    // the menu layout. Label includes the current value so the user
-    // doesn't have to open the submenu to check.
+    // SendInput pacing presets — only meaningful when mode=SendInput, so
+    // we grey them out under Clipboard mode (the entry stays visible to
+    // keep the menu layout stable on mode switches, but can't be clicked).
+    // Label carries the current value so the user doesn't have to open
+    // the submenu to check.
+    let sendinput_active = cfg.output.mode == OutputMode::Sendinput;
     let delay_sub = Submenu::new(
         format!("SendInput char delay: {} ms", cfg.output.send_key_delay_ms),
-        true,
+        sendinput_active,
     );
     for (label, val) in SEND_DELAY_OPTIONS {
         let id = MenuId::new(format!("{PREFIX_SEND_DELAY}{val}"));
@@ -377,7 +379,7 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
 
     let hold_sub = Submenu::new(
         format!("SendInput key hold: {} ms", cfg.output.send_key_down_delay_ms),
-        true,
+        sendinput_active,
     );
     for (label, val) in SEND_HOLD_OPTIONS {
         let id = MenuId::new(format!("{PREFIX_SEND_HOLD}{val}"));

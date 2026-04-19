@@ -234,7 +234,7 @@ binding = "F8"          # see "Hotkey reference" below
 mode                    = "clipboard"  # "clipboard" or "sendinput"
 trailing_space          = true         # append " " after transcription (helps when chaining utterances)
 send_enter              = false        # press Enter after the text — useful in chat clients / terminals
-send_key_delay_ms       = 5            # SendInput: ms sleep between characters (raise if target app drops chars)
+send_key_delay_ms       = 20           # SendInput: ms sleep between characters; safe default, lower for faster typing on well-behaved editors
 send_key_down_delay_ms  = 0            # SendInput: ms to hold each key "down" (raise for legacy apps that filter zero-duration presses)
 
 [startup]
