@@ -152,7 +152,7 @@ The sections below walk through the same steps manually.
 git clone https://github.com/microsoft/VibeVoice VibeVoice
 cp .env.vibevoice.example .env
 # edit HUGGING_FACE_HUB_TOKEN if you have one
-docker compose -f docker-compose-vibevoice.yml --profile asr up -d
+docker compose -f docker-compose-vibevoice.yml up -d
 # Gradio UI on http://localhost:7860
 ```
 
