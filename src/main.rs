@@ -170,11 +170,20 @@ fn main() -> Result<()> {
     // Exactly one of (binding_manager active, vad_session Some) is ever
     // engaged — `apply_input_mode` enforces that invariant.
     let mut vad_session: Option<audio::VadSession> = None;
+    // Declared here (before the startup `apply_input_mode` call) because
+    // mode switches clear it to unstick a pending SpeechStart when the
+    // session is torn down.
+    let vad_speech_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // Apply the configured input mode on startup.
     {
         let snapshot = cfg.lock().unwrap().clone();
-        apply_input_mode(&snapshot, &mut binding_manager, &mut vad_session);
+        apply_input_mode(
+            &snapshot,
+            &mut binding_manager,
+            &mut vad_session,
+            &vad_speech_active,
+        );
     }
 
     // Recording state
@@ -217,8 +226,8 @@ fn main() -> Result<()> {
         Arc::new(Mutex::new((tray::TrayStatus::Idle, None)));
     // Tracks whether the VAD has an open utterance right now. Used purely
     // for the tray icon (Recording green while VAD speaks, else the teal
-    // VadListening when the mic is hot but idle).
-    let vad_speech_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    // VadListening when the mic is hot but idle). Declared earlier —
+    // apply_input_mode on startup needs it.
 
     let cfg_loop = cfg.clone();
     let recorder_loop = recorder.clone();
@@ -687,18 +696,18 @@ fn main() -> Result<()> {
                                     &snapshot,
                                     &mut binding_manager,
                                     &mut vad_session,
+                                    &vad_speech_active_loop,
                                 );
                             }
                             if outcome.hotkey_changed {
-                                // Only re-register when we're currently in PTT —
-                                // VAD mode ignores the binding entirely.
+                                // Both modes use the binding now (PTT as the
+                                // talk key, VAD as a cancel-in-flight hotkey),
+                                // so always re-register on a binding change.
                                 let snapshot = cfg_loop.lock().unwrap().clone();
-                                if snapshot.input.mode == InputMode::PushToTalk {
-                                    if let Err(e) =
-                                        binding_manager.apply(&snapshot.hotkey.binding)
-                                    {
-                                        log::error!("apply new binding failed: {e:#}");
-                                    }
+                                if let Err(e) =
+                                    binding_manager.apply(&snapshot.hotkey.binding)
+                                {
+                                    log::error!("apply new binding failed: {e:#}");
                                 }
                             }
                             if outcome.request_capture {
@@ -850,6 +859,7 @@ fn apply_input_mode(
     cfg: &Config,
     binding_manager: &mut BindingManager,
     vad_session: &mut Option<audio::VadSession>,
+    vad_speech_active: &Arc<AtomicBool>,
 ) {
     match cfg.input.mode {
         InputMode::PushToTalk => {
@@ -857,6 +867,12 @@ fn apply_input_mode(
                 log::info!("Input mode → PTT: stopping VAD session");
                 s.stop();
             }
+            // The event rx dies with the session, so any SpeechStart /
+            // Utterance that was in-flight when we tore down won't be
+            // drained by the main loop. Clear the flag explicitly —
+            // otherwise the reconciler sees vad_speaking=true forever
+            // and leaves the tray stuck on the green recording icon.
+            vad_speech_active.store(false, Ordering::SeqCst);
             let binding = cfg.hotkey.binding.clone();
             if let Err(e) = binding_manager.apply(&binding) {
                 log::error!(

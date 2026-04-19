@@ -64,28 +64,28 @@ pub const MAXTOK_OPTIONS: &[(&str, u32)] = &[
     ("32768 (~20 min)", 32768),
 ];
 
-/// SendInput inter-character pacing presets (ms). 10 ms is the default —
-/// fast enough to feel instant, slow enough that Electron apps, Notepad
-/// and terminals keep up. 0 ms (burst) drops characters on most targets;
-/// bump to 20-30 ms on slow hardware or legacy editors.
+/// SendInput inter-character pacing presets (ms). 5 ms is the default but
+/// Notepad and Electron apps on slower hardware still drop characters —
+/// bump to 15-30 ms for those. 0 ms = burst mode (fastest, least reliable).
 pub const SEND_DELAY_OPTIONS: &[(&str, u64)] = &[
     ("0 ms (burst, fastest)", 0),
     ("5 ms", 5),
-    ("10 ms (default)", 10),
+    ("10 ms", 10),
     ("15 ms", 15),
-    ("20 ms (safe)", 20),
+    ("20 ms (default, safe)", 20),
     ("30 ms", 30),
     ("50 ms (very slow, safest)", 50),
 ];
 
-/// SendInput key-down hold presets (ms). Usually 0 works. A few legacy /
-/// hardened apps filter zero-duration keypresses; raise if characters
-/// still drop after bumping the inter-char delay.
+/// SendInput key-down hold presets (ms). 0 works against well-behaved
+/// targets but several apps filter out zero-duration keypresses, so 10 ms
+/// is the default. Raise further only if characters still drop after
+/// bumping the inter-char delay.
 pub const SEND_HOLD_OPTIONS: &[(&str, u64)] = &[
-    ("0 ms (default)", 0),
+    ("0 ms (burst)", 0),
     ("2 ms", 2),
     ("5 ms", 5),
-    ("10 ms", 10),
+    ("10 ms (default)", 10),
     ("20 ms", 20),
 ];
 

@@ -244,22 +244,24 @@ pub struct OutputConfig {
     #[serde(default)]
     pub send_enter: bool,
     /// Milliseconds to sleep between successive characters in SendInput
-    /// mode. Too fast (0 ms burst) and Electron/Chromium apps (Discord,
-    /// Slack, VS Code), Notepad, and some terminals silently drop
-    /// characters; too slow and dictation feels sluggish. 10 ms is the
-    /// default — still snappy, but enough for the target's message pump
-    /// to keep up. Bump to 20-30 ms for Notepad / legacy apps on slow
-    /// hardware, drop to 5 ms into known-well-behaved editors.
+    /// mode. Too fast and Electron/Chromium apps (Discord, Slack, VS Code),
+    /// Notepad, and some terminals silently drop characters; too slow and
+    /// dictation feels sluggish. 20 ms ≈ 50 chars/sec is the safe default
+    /// that works even on slower CPUs; drop to 5-10 ms on fast machines
+    /// into well-behaved editors if you want faster injection.
     #[serde(default = "default_send_key_delay_ms")]
     pub send_key_delay_ms: u64,
     /// Milliseconds to hold each key "down" before releasing (down→up gap
-    /// per character). Usually 0 is fine; bump to 5-10 ms for a handful of
-    /// legacy apps that filter out keypresses with zero duration.
-    #[serde(default)]
+    /// per character). 0 works against some targets but several apps filter
+    /// out zero-duration keypresses, so 10 ms is the default — still
+    /// imperceptible but reliable. Raise further only if characters still
+    /// drop after bumping the inter-char delay.
+    #[serde(default = "default_send_key_down_delay_ms")]
     pub send_key_down_delay_ms: u64,
 }
 
-fn default_send_key_delay_ms() -> u64 { 10 }
+fn default_send_key_delay_ms() -> u64 { 20 }
+fn default_send_key_down_delay_ms() -> u64 { 10 }
 
 impl Default for OutputConfig {
     fn default() -> Self {
@@ -268,7 +270,7 @@ impl Default for OutputConfig {
             trailing_space: true,
             send_enter: false,
             send_key_delay_ms: default_send_key_delay_ms(),
-            send_key_down_delay_ms: 0,
+            send_key_down_delay_ms: default_send_key_down_delay_ms(),
         }
     }
 }
