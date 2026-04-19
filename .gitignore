@@ -2,9 +2,9 @@
 Cargo.lock
 *.log
 
-# Upstream VibeVoice checkout — not our code, user clones it alongside.
+# Upstream VibeVoice checkout — not our code, user clones it into the repo root.
 # See README "Backend setup" for how to populate this folder.
-/vibe-voice/
+/VibeVoice/
 
 # Per-host overrides for docker compose
 .env

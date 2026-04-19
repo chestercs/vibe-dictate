@@ -1,7 +1,7 @@
 # CLAUDE.md — vibe-dictate
 
 Guidance for Claude Code sessions working on this project. Read this first
-when starting a new conversation in `tools/vibe-dictate/`.
+when starting a new conversation in the `vibe-dictate/` repo root.
 
 ## Project at a glance
 
@@ -12,15 +12,11 @@ when starting a new conversation in `tools/vibe-dictate/`.
 - **Where it lives**: the vibe-dictate git repo lives at
   `git.petyuspolisz.com/chestercs/vibe-dictate.git` (branch `main`, push
   there). On Peter's dev box it physically sits at
-  `E:\...\codes\VibeVoice\tools\vibe-dictate\` because historically it
-  was nested inside a Microsoft VibeVoice upstream clone. The **current**
-  layout convention is:
+  `E:\MINDENES_MERT_HALOTT_HDD\codes\vibe-dictate\`. Layout convention:
     - vibe-dictate is the top-level project (repo root).
-    - The upstream VibeVoice checkout goes into a `vibe-voice/`
+    - The upstream VibeVoice checkout goes into a `VibeVoice/`
       subdirectory (gitignored). `VIBEVOICE_SRC` in `.env` lets a dev box
-      override this to an absolute path (Peter's box uses `../..` because
-      the physical layout is still nested — the compose file lives in
-      `tools/vibe-dictate/` so two dirs up *is* the VibeVoice tree).
+      override this to an absolute path if needed.
     - Microsoft's VibeVoice has its own `.git` pointing at
       `github.com/microsoft/VibeVoice`. Never push there.
 - **Build**: cross-compile via Docker from this repo's root. No Rust
@@ -51,7 +47,7 @@ when starting a new conversation in `tools/vibe-dictate/`.
 ### Starting a build
 
 ```bash
-# from this repo's root (tools/vibe-dictate/ on Peter's box):
+# from this repo's root:
 taskkill //IM vibe-dictate.exe //F 2>/dev/null; true   # release exe lock
 docker compose -f docker-compose-vibedictate-build.yml run --rm vibedictate-build
 ```
@@ -290,7 +286,7 @@ there's a concrete need.
 
 - Read the parent README.md — it's user-facing but covers the model
   and hosting context too.
-- The `/tools/vibe-dictate/src/` modules each have a short top-of-file
+- The `src/` modules each have a short top-of-file
   doc comment explaining their role.
 - Logs at `%LOCALAPPDATA%\chestercs\vibe-dictate\cache\vibe-dictate.log`.
 - Config at `%APPDATA%\chestercs\vibe-dictate\config\config.toml`.
