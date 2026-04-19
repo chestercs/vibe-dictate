@@ -114,6 +114,7 @@ vibe-dictate/                        <- this repo
   docker-compose-vibedictate-build.yml   <- Rust cross-compile pipeline
   Dockerfile.build                   <- builder image for the .exe
   Dockerfile.vibevoice-gb10          <- B-opció (prebuilt) GB10 image
+  scripts/setup_vibevoice.sh         <- one-shot clone + .env + pull helper
   scripts/vibevoice_entrypoint.sh    <- runtime pip-install on first boot
   .env.vibevoice.example             <- copy to .env for x86_64
   .env.vibevoice-gb10.example        <- copy to .env for GB10
@@ -122,18 +123,25 @@ vibe-dictate/                        <- this repo
     demo/ vibevoice/ vllm_plugin/ ...
 ```
 
-Clone the upstream repo into `VibeVoice/`:
+### One-shot setup
+
+The backend host has a helper script that clones the upstream tree,
+seeds `.env`, pre-pulls the base image, and optionally brings the
+stack up:
 
 ```bash
-git clone https://github.com/microsoft/VibeVoice VibeVoice
+scripts/setup_vibevoice.sh                   # GB10 (default), clone + pull
+scripts/setup_vibevoice.sh --arch x86        # consumer NVIDIA stack
+scripts/setup_vibevoice.sh --arch x86 --up   # also `compose up -d`
+scripts/setup_vibevoice.sh --build           # B-opció prebuilt image (GB10 only)
 ```
 
-Override the default via `VIBEVOICE_SRC=/abs/path` in your `.env` if you
-keep the upstream tree elsewhere (shared disk, etc.).
+The sections below walk through the same steps manually.
 
 ### Option A — local Docker (RTX 4090 / dev workstation)
 
 ```bash
+git clone https://github.com/microsoft/VibeVoice VibeVoice
 cp .env.vibevoice.example .env
 # edit HUGGING_FACE_HUB_TOKEN if you have one
 docker compose -f docker-compose-vibevoice.yml --profile asr up -d
@@ -150,6 +158,7 @@ subsequent restarts skip pip entirely.
 For Grace Blackwell unified-memory machines:
 
 ```bash
+git clone https://github.com/microsoft/VibeVoice VibeVoice
 cp .env.vibevoice-gb10.example .env
 # edit VIBEVOICE_BASE_DIR (USB mount on GB10) + token
 docker compose up -d    # COMPOSE_FILE is set in .env
