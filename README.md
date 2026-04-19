@@ -112,9 +112,10 @@ endpoints — see [Option C](#option-c--managed-cloud).
 
 vibe-dictate doesn't bundle an ASR server — you point it at an
 OpenAI-compatible endpoint someone (you, your team, OpenAI, an Azure
-deployment, …) runs. The compose files needed to stand one up with
-VibeVoice live in this repo; the upstream VibeVoice source itself isn't
-vendored and has to be cloned separately when self-hosting.
+deployment, …) runs. This repo ships two minimal compose files that
+stand a VibeVoice-backed endpoint up with zero checkout of the upstream
+source: `transformers>=5.3` carries `microsoft/VibeVoice-ASR-HF`
+natively, so the entrypoint just pip-installs the deps on first boot.
 
 ### Expected repo layout
 
@@ -124,30 +125,32 @@ vibe-dictate/                            <- this repo
   docker-compose-vibevoice-asr-gb10.yml  <- GB10 DGX Spark backend
   docker-compose-vibedictate-build.yml   <- Rust cross-compile pipeline
   Dockerfile.build                       <- builder image for the .exe
-  Dockerfile.vibevoice-gb10              <- B-opció (prebuilt) GB10 image
-  setup_vibevoice.sh                     <- one-shot clone + .env + pull (Linux/macOS)
-  setup_vibevoice.bat                    <- one-shot clone + .env + pull (Windows)
+  setup_vibevoice.sh                     <- one-shot .env + pull (Linux/macOS)
+  setup_vibevoice.bat                    <- one-shot .env + pull (Windows)
   scripts/openai_asr_server.py           <- FastAPI shim, OpenAI-compat
   scripts/openai_asr_entrypoint.sh       <- runtime pip install (transformers 5.x)
-  scripts/vibevoice_entrypoint.sh        <- runtime pip install (legacy Gradio demo)
   .env.vibevoice.example                 <- copy to .env for x86_64
   .env.vibevoice-gb10.example            <- copy to .env for GB10
   src/                                   <- Rust client source
-  VibeVoice/                             <- upstream microsoft/VibeVoice (gitignored)
-    demo/ vibevoice/ vllm_plugin/ ...
+  vibevoice-lab/                         <- experimental playground (see its README)
 ```
+
+Gradio demo, realtime TTS, vLLM experiments and the B-opció prebuilt
+GB10 image all live under `vibevoice-lab/` — a self-contained stack
+that ships its own compose file, `.env`, and setup script. None of it
+is needed for dictation. Lift it out into its own project if/when you
+want to experiment.
 
 ### One-shot setup
 
-The backend host has a helper that clones the upstream tree, seeds
-`.env`, pre-pulls the base image, and optionally brings the stack up.
-Linux/macOS hosts use the bash version, Windows hosts the batch twin:
+The backend host has a helper that seeds `.env`, pre-pulls the base
+image, and optionally brings the stack up. Linux/macOS hosts use the
+bash version, Windows hosts the batch twin:
 
 ```bash
 # Linux/macOS (default --arch gb10)
-./setup_vibevoice.sh                    # clone + pull
+./setup_vibevoice.sh                    # seed + pull
 ./setup_vibevoice.sh --arch x86 --up    # consumer NVIDIA + compose up -d
-./setup_vibevoice.sh --build            # B-opció prebuilt image (GB10 only)
 ```
 
 ```bat
@@ -162,12 +165,10 @@ The sections below walk through the same steps manually.
 ### Option A — local Docker (RTX 4090 / dev workstation)
 
 ```bash
-git clone https://github.com/microsoft/VibeVoice VibeVoice
 cp .env.vibevoice.example .env
 # edit HUGGING_FACE_HUB_TOKEN if you have one
 docker compose -f docker-compose-vibevoice.yml up -d
 # OpenAI-compat ASR on http://localhost:8080
-# optional:  add --profile gradio  for the legacy :7860 demo UI
 ```
 
 First boot downloads the ~16 GB model from HuggingFace; a token avoids
@@ -180,7 +181,6 @@ container lifetime (marker file at `/root/.vibevoice_openai_installed`)
 For Grace Blackwell unified-memory machines:
 
 ```bash
-git clone https://github.com/microsoft/VibeVoice VibeVoice
 cp .env.vibevoice-gb10.example .env
 # edit VIBEVOICE_BASE_DIR (USB mount on GB10) + token
 docker compose up -d    # COMPOSE_FILE is set in .env
@@ -188,9 +188,7 @@ docker compose up -d    # COMPOSE_FILE is set in .env
 
 Runs on `nvcr.io/nvidia/pytorch:25.12-py3` (CUDA 13, aarch64) and coexists
 with other GPU workloads (e.g. a Gemma vLLM container) within the 128 GB
-unified pool. Default `up -d` brings both the OpenAI-compat ASR (port
-8080) and the 0.5B realtime TTS (port 3000); combined VRAM is ~18 GB.
-The legacy Gradio demo is still available via `--profile gradio`.
+unified pool. Peak VRAM ~16-22 GB.
 
 ### Option C — managed cloud
 

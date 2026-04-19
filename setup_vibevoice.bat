@@ -1,29 +1,28 @@
 @echo off
 rem =============================================================================
-rem  Bootstraps the VibeVoice backend on Windows (Docker Desktop host).
+rem  Bootstraps the VibeVoice STT backend on Windows (Docker Desktop host).
 rem
 rem  Mirrors setup_vibevoice.sh. Default --arch x86 since GB10 is Linux-only.
-rem  Default service is the OpenAI-compat ASR shim (port 8080); the legacy
-rem  Gradio demo is gated behind `docker compose --profile gradio up -d`.
+rem  The OpenAI-compat ASR shim (port 8080) needs NO VibeVoice checkout —
+rem  transformers 5.3+ carries microsoft/VibeVoice-ASR-HF natively.
+rem
+rem  For the Gradio demo / realtime TTS / vLLM / B-opcio prebuilt image,
+rem  see vibevoice-lab\ (separate stack, profile-gated).
 rem
 rem  Usage:
-rem    setup_vibevoice.bat                   :: x86 stack, clone + pull
+rem    setup_vibevoice.bat                   :: x86 stack, seed + pull
 rem    setup_vibevoice.bat --arch gb10       :: (rare on Windows) GB10 stack
-rem    setup_vibevoice.bat --build           :: prebuilt image (GB10 only)
 rem    setup_vibevoice.bat --up              :: also bring the stack up
 rem    setup_vibevoice.bat --arch x86 --up
 rem =============================================================================
 setlocal enabledelayedexpansion
 
 set "ARCH=x86"
-set "DO_BUILD=0"
 set "DO_UP=0"
-set "UPSTREAM_URL=https://github.com/microsoft/VibeVoice"
 
 :parse
 if "%~1"=="" goto :parsed
 if /I "%~1"=="--arch"    ( set "ARCH=%~2" & shift & shift & goto :parse )
-if /I "%~1"=="--build"   ( set "DO_BUILD=1" & shift & goto :parse )
 if /I "%~1"=="--up"      ( set "DO_UP=1" & shift & goto :parse )
 if /I "%~1"=="-h"        ( goto :usage )
 if /I "%~1"=="--help"    ( goto :usage )
@@ -50,34 +49,9 @@ where docker >nul 2>&1 || (
     popd >nul
     exit /b 1
 )
-where git >nul 2>&1 || (
-    echo git not found on PATH 1>&2
-    popd >nul
-    exit /b 1
-)
 
 rem -----------------------------------------------------------------
-rem 1. Upstream checkout
-rem -----------------------------------------------------------------
-if exist "VibeVoice\.git" (
-    echo [setup] VibeVoice\ exists, fetching upstream
-    git -C VibeVoice fetch --quiet origin
-    git -C VibeVoice merge --ff-only origin/HEAD
-    if errorlevel 1 (
-        echo [setup] VibeVoice has local commits -- skipping ff merge
-    )
-) else (
-    echo [setup] cloning %UPSTREAM_URL% -^> VibeVoice\
-    git clone --depth 1 %UPSTREAM_URL% VibeVoice
-    if errorlevel 1 (
-        echo [setup] git clone failed 1>&2
-        popd >nul
-        exit /b 1
-    )
-)
-
-rem -----------------------------------------------------------------
-rem 2. .env
+rem 1. .env
 rem -----------------------------------------------------------------
 if not exist ".env" (
     echo [setup] seeding .env from %ENV_EXAMPLE%
@@ -91,33 +65,14 @@ if not exist ".env" (
 )
 
 rem -----------------------------------------------------------------
-rem 3. Pre-pull base images
+rem 2. Pre-pull base image
 rem -----------------------------------------------------------------
 echo [setup] docker compose pull
 docker compose --env-file .env -f "%COMPOSE_FILE%" pull
 if errorlevel 1 echo [setup] pull reported errors -- continuing
 
 rem -----------------------------------------------------------------
-rem 4. Optional prebuilt image (GB10 B-opció)
-rem -----------------------------------------------------------------
-if "%DO_BUILD%"=="1" (
-    if /I not "%ARCH%"=="gb10" (
-        echo [setup] --build only applies to --arch gb10; skipping
-    ) else (
-        set "CTX=%VIBEVOICE_SRC%"
-        if not defined VIBEVOICE_SRC set "CTX=.\VibeVoice"
-        echo [setup] building vibevoice-gb10:latest from !CTX!
-        docker build -f Dockerfile.vibevoice-gb10 -t vibevoice-gb10:latest "!CTX!"
-        if errorlevel 1 (
-            echo [setup] docker build failed 1>&2
-            popd >nul
-            exit /b 1
-        )
-    )
-)
-
-rem -----------------------------------------------------------------
-rem 5. Optional up
+rem 3. Optional up
 rem -----------------------------------------------------------------
 if "%DO_UP%"=="1" (
     echo [setup] docker compose up -d
@@ -137,8 +92,7 @@ exit /b 0
 :usage
 echo.
 echo Usage:
-echo   setup_vibevoice.bat                   :: x86 stack, clone + pull
+echo   setup_vibevoice.bat                   :: x86 stack, seed + pull
 echo   setup_vibevoice.bat --arch gb10       :: GB10 stack
-echo   setup_vibevoice.bat --build           :: prebuilt image ^(GB10 only^)
 echo   setup_vibevoice.bat --up              :: also bring the stack up
 exit /b 2

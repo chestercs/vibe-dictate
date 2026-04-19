@@ -6,9 +6,9 @@ Cargo.lock
 # here to override the default blue-square-with-white-dot branding.
 /assets/icon.ico
 
-# Upstream VibeVoice checkout — not our code, user clones it into the repo root.
-# See README "Backend setup" for how to populate this folder.
-/VibeVoice/
+# Upstream VibeVoice checkout — populated by vibevoice-lab/setup_lab.sh for the
+# experimental stack. Not needed for the core OpenAI-compat STT backend.
+/vibevoice-lab/VibeVoice/
 
 # Per-host overrides for docker compose
 .env

@@ -16,10 +16,13 @@ when starting a new conversation in the `vibe-dictate/` repo root.
   `git.petyuspolisz.com/chestercs/vibe-dictate.git` (branch `main`, push
   there). On Peter's dev box it physically sits at
   `E:\MINDENES_MERT_HALOTT_HDD\codes\vibe-dictate\`. Layout convention:
-    - vibe-dictate is the top-level project (repo root).
-    - The upstream VibeVoice checkout goes into a `VibeVoice/`
-      subdirectory (gitignored). `VIBEVOICE_SRC` in `.env` lets a dev box
-      override this to an absolute path if needed.
+    - vibe-dictate is the top-level project (repo root) — minimal set
+      of files for dictation + a thin OpenAI-compat STT compose stack.
+    - Everything experimental (Gradio demo, realtime TTS, vLLM,
+      OpenAI-compat TTS wrapper, B-opció GB10 prebuilt image) lives
+      under `vibevoice-lab/` with its own `docker-compose.yml`, `.env`,
+      `setup_lab.sh` and gitignored `VibeVoice/` upstream clone. The
+      lab folder is designed to be lifted into its own project later.
     - Microsoft's VibeVoice has its own `.git` pointing at
       `github.com/microsoft/VibeVoice`. Never push there.
 - **Build**: cross-compile via Docker from this repo's root. No Rust
@@ -33,11 +36,13 @@ when starting a new conversation in the `vibe-dictate/` repo root.
 - **Hardware**: Windows 11 dev box + ASUS GB10 DGX Spark (Grace Blackwell,
   sm_121, 128 GB unified LPDDR5x, CUDA 13) for backend work.
 - **Backend setup**: a Gemma 4 31B vLLM container already runs on the
-  GB10, taking ~80 GB. ~20 GB remains for VibeVoice. The GB10 stack
-  (`docker-compose-vibevoice-asr-gb10.yml`, `Dockerfile.vibevoice-gb10`,
-  `scripts/vibevoice_entrypoint.sh`, `.env.vibevoice-gb10.example`) now
-  lives **in this vibe-dictate repo** (moved from the parent VibeVoice
-  root in v0.2).
+  GB10, taking ~80 GB. ~20 GB remains for VibeVoice. The GB10 STT stack
+  (`docker-compose-vibevoice-asr-gb10.yml`, `.env.vibevoice-gb10.example`,
+  `scripts/openai_asr_server.py`, `scripts/openai_asr_entrypoint.sh`)
+  lives in this repo. The B-opció prebuilt GB10 image
+  (`Dockerfile.vibevoice-gb10`) lives under `vibevoice-lab/` and is
+  only relevant if/when we decide to ship a prebuilt image rather than
+  the runtime-install pattern.
 - **Conversation language**: Hungarian. Code and code identifiers in
   English. README is in English; CLAUDE.md is in English.
 - **Communication style**: terse. Don't summarize what the diff already
@@ -160,11 +165,10 @@ src/singleton.rs       # named-mutex single-instance lock
 
 Repo also ships the backend plumbing: `scripts/openai_asr_server.py`
 (FastAPI shim that exposes VibeVoice-ASR-HF as `/v1/audio/transcriptions`),
-`scripts/openai_asr_entrypoint.sh` (runtime transformers>=5.3 install),
-the x86/GB10 compose files, `Dockerfile.vibevoice-gb10` (B-opció prebuilt
-image for GB10 — still points at the legacy Gradio demo CMD; if we move
-the backend to GB10 with OpenAI-compat we'll need a separate Dockerfile
-or a CMD swap here).
+`scripts/openai_asr_entrypoint.sh` (runtime transformers>=5.3 install)
+and the x86/GB10 compose files. Experimental services (Gradio demo,
+realtime TTS, vLLM, OpenAI-compat TTS wrapper) + the B-opció prebuilt
+GB10 image live under `vibevoice-lab/` and are fully decoupled.
 
 ## Architecture notes
 
@@ -291,9 +295,13 @@ there's a concrete need.
 - **v0.2 transport is OpenAI-compat, not Gradio**. Client does one
   multipart `POST /v1/audio/transcriptions` (see `src/openai.rs`); no
   more upload + call + SSE. Backend side is `scripts/openai_asr_server.py`
-  (FastAPI + `VibeVoiceAsrForConditionalGeneration`). The legacy Gradio
-  service still builds and runs, but it's behind `--profile gradio` in
-  both compose files — users won't touch it unless they ask for it.
+  (FastAPI + `VibeVoiceAsrForConditionalGeneration`).
+- **Experimental split into `vibevoice-lab/`**. The Gradio demo,
+  realtime TTS, vLLM, and OpenAI-compat TTS wrapper are all profile-
+  gated services under `vibevoice-lab/docker-compose.yml` with their
+  own `.env` / `setup_lab.sh` / `Dockerfile.vibevoice-gb10`. Main repo
+  ships only the OpenAI-compat ASR stack now; lab folder is designed
+  to be lifted into its own project.
 - **Config `[gradio]` → `[server]` with serde aliases**. Old fields
   (`url`, `api_token`) still load, get rewritten on first save. A
   one-shot migration also bumps the legacy `http://localhost:7860`
@@ -301,10 +309,6 @@ there's a concrete need.
 - **Model weights live in a named Docker volume** (`vibevoiceHFCache` /
   `vibevoiceHFCacheDir`). `docker compose down` keeps them. Explicit
   `docker volume rm` or `down -v` is the only way to lose them.
-- **`Dockerfile.vibevoice-gb10` is legacy-Gradio-flavored**. Its CMD
-  runs `demo/vibevoice_asr_gradio_demo.py`, not the OpenAI shim. If we
-  eventually move the backend to GB10 with the OpenAI shim as a
-  prebuilt image, either swap the CMD or ship a second Dockerfile.
 - **SendInput is batched**, not per-character. Per-character hammering
   raced with browser/terminal message pumps and dropped events.
   See `injector::send_input_text` — single call, chunked at 100 events,

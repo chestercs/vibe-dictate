@@ -1,287 +1,28 @@
 # ============================================================================
-#  VibeVoice backend — ASUS GB10 DGX Spark (Grace Blackwell, sm_121).
+#  VibeVoice STT backend for vibe-dictate — ASUS GB10 DGX Spark
+#  (Grace Blackwell, sm_121, aarch64, CUDA 13).
 #
-#  Co-exists with a running Gemma 4 31B NVFP4 vLLM container (port 8004).
+#  Exposes the OpenAI Audio API (/v1/audio/transcriptions) backed by
+#  microsoft/VibeVoice-ASR-HF. Any OpenAI-compat STT client can point at
+#  it (Open WebUI, LibreChat, vibe-dictate, the OpenAI SDK, ...).
+#
+#  Co-exists with a running Gemma 4 31B NVFP4 vLLM container (port 8004)
+#  within the 128 GB unified LPDDR5x pool. Peak VRAM ~16-22 GB.
 #
 #  Start:
 #    cp .env.vibevoice-gb10.example .env   # first run only
 #    docker compose up -d                  # COMPOSE_FILE is set in .env
 #
-#  Default `up -d` brings:
-#    vibevoice-asr-openai   (port 8080, OpenAI-compat /v1/audio/transcriptions)
-#    vibevoice-realtime-tts (port 3000, WebSocket, English only)
-#  Combined VRAM ~18 GB — fits in the ~20 GB left by Gemma.
+#  Runtime-install pattern (no docker build): first boot runs
+#  scripts/openai_asr_entrypoint.sh, which pip-installs transformers>=5.3
+#  + FastAPI behind a marker file. Restarts skip pip entirely.
 #
-#  Experimental / opt-in profiles:
-#    docker compose --profile gradio up vibevoice-asr          # legacy Gradio demo
-#    docker compose --profile vllm up vibevoice-vllm-asr
-#    docker compose --profile openai-tts up vibevoice-openai-tts
-#
-#  Default path: runtime-install (A-opció) using NVIDIA's prebuilt image.
-#  First boot runs scripts/vibevoice_entrypoint.sh, which pip-installs
-#  VibeVoice into the container (~2 min) behind a marker file.
-#
-#  B-opció (faster restarts): use Dockerfile.vibevoice-gb10 — swap the
-#  `image:` line below for a `build: { context: ${VIBEVOICE_SRC:-./VibeVoice},
-#  dockerfile: ../Dockerfile.vibevoice-gb10 }` block.
-#
-#  Layout expected:
-#    vibe-dictate/                      <- compose file lives here
-#      docker-compose-vibevoice-asr-gb10.yml
-#      scripts/vibevoice_entrypoint.sh
-#      VibeVoice/                       <- upstream VibeVoice checkout
-#        demo/ vibevoice/ vllm_plugin/ ...
+#  For the Gradio demo / realtime TTS / vLLM experiments / B-opció
+#  prebuilt image, see the `vibevoice-lab/` folder.
 # ============================================================================
 
 services:
 
-  # -----------------------------------------------------------------
-  # Gradio ASR demo (transformers-based, sdpa attention)
-  # Port 7860, Hungarian STT + hotwords + structured Who/When/What.
-  # -----------------------------------------------------------------
-  vibevoice-asr:
-    image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.12-py3}
-    container_name: vibevoice-asr
-    hostname: vibevoice-asr
-    profiles: ["gradio"]
-    restart: unless-stopped
-    tty: true
-    ipc: host
-    entrypoint: ["/bin/bash", "/workspace/vibe-dictate-scripts/vibevoice_entrypoint.sh"]
-    command: >
-      python demo/vibevoice_asr_gradio_demo.py
-      --model_path ${VIBEVOICE_ASR_MODEL:-microsoft/VibeVoice-ASR}
-      --host 0.0.0.0
-      --port 7860
-      --attn_implementation ${VIBEVOICE_ATTN:-sdpa}
-      --max_new_tokens ${VIBEVOICE_MAX_NEW_TOKENS:-8192}
-    working_dir: /workspace/VibeVoice
-    ports:
-      - "${VIBEVOICE_ASR_PORT:-7860}:7860"
-    volumes:
-      - ${VIBEVOICE_SRC:-./VibeVoice}:/workspace/VibeVoice
-      - ./scripts:/workspace/vibe-dictate-scripts:ro
-      - vibevoiceHFCacheDir:/root/.cache/huggingface
-      - vibevoiceTorchCacheDir:/root/.cache/torch
-      - vibevoicePipCacheDir:/root/.cache/pip
-    environment:
-      HF_HOME: /root/.cache/huggingface
-      TRANSFORMERS_CACHE: /root/.cache/huggingface
-      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      HF_HUB_OFFLINE: "0"
-      PYTHONUNBUFFERED: "1"
-      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-      GRADIO_SERVER_NAME: 0.0.0.0
-      TORCH_CUDA_ARCH_LIST: "12.0+PTX"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "150m"
-        max-file: "3"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:7860/"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      # First boot: pip install (~2 min) + model download (~14 GB).
-      start_period: 600s
-
-  # -----------------------------------------------------------------
-  # Realtime 0.5B TTS WebSocket endpoint
-  # Port 3000, FastAPI + /stream WS, ~200 ms first-audio latency.
-  # Voice cloning: drop a 5-15s WAV into demo/voices/ (upstream folder).
-  # -----------------------------------------------------------------
-  vibevoice-realtime-tts:
-    image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.12-py3}
-    container_name: vibevoice-realtime-tts
-    hostname: vibevoice-realtime-tts
-    restart: unless-stopped
-    tty: true
-    ipc: host
-    entrypoint: ["/bin/bash", "/workspace/vibe-dictate-scripts/vibevoice_entrypoint.sh"]
-    command: >
-      python demo/vibevoice_realtime_demo.py
-      --model_path ${VIBEVOICE_REALTIME_MODEL:-microsoft/VibeVoice-Realtime-0.5B}
-      --device cuda
-      --port 3000
-    working_dir: /workspace/VibeVoice/demo
-    ports:
-      - "${VIBEVOICE_REALTIME_PORT:-3000}:3000"
-    volumes:
-      - ${VIBEVOICE_SRC:-./VibeVoice}:/workspace/VibeVoice
-      - ./scripts:/workspace/vibe-dictate-scripts:ro
-      - vibevoiceHFCacheDir:/root/.cache/huggingface
-      - vibevoiceTorchCacheDir:/root/.cache/torch
-      - vibevoicePipCacheDir:/root/.cache/pip
-    environment:
-      HF_HOME: /root/.cache/huggingface
-      TRANSFORMERS_CACHE: /root/.cache/huggingface
-      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      MODEL_PATH: ${VIBEVOICE_REALTIME_MODEL:-microsoft/VibeVoice-Realtime-0.5B}
-      MODEL_DEVICE: cuda
-      PYTHONUNBUFFERED: "1"
-      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-      TORCH_CUDA_ARCH_LIST: "12.0+PTX"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "150m"
-        max-file: "3"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:3000/"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 400s
-
-  # -----------------------------------------------------------------
-  # EXPERIMENTAL (profile=vllm): OpenAI-compatible /v1/chat/completions
-  # Only start this after replacing the image with an sm_121-compatible
-  # vLLM build AND stopping vibevoice-asr (won't fit together in 20 GB).
-  # -----------------------------------------------------------------
-  vibevoice-vllm-asr:
-    image: ${VIBEVOICE_VLLM_IMAGE:-vllm/vllm-openai:v0.14.1}
-    container_name: vibevoice-vllm-asr
-    hostname: vibevoice-vllm-asr
-    restart: unless-stopped
-    tty: true
-    ipc: host
-    profiles: ["vllm"]
-    entrypoint: ["bash", "-lc"]
-    command: >
-      "python3 /app/vllm_plugin/scripts/start_server.py
-        --model ${VIBEVOICE_ASR_MODEL:-microsoft/VibeVoice-ASR}
-        --port 8005
-        --tp 1 --dp 1
-        --max-num-seqs ${VIBEVOICE_VLLM_MAX_SEQS:-16}
-        --max-model-len ${VIBEVOICE_VLLM_MAX_MODEL_LEN:-65536}
-        --gpu-memory-utilization ${VIBEVOICE_VLLM_MEM_UTIL:-0.18}"
-    working_dir: /app
-    ports:
-      - "${VIBEVOICE_VLLM_PORT:-8005}:8005"
-    volumes:
-      - ${VIBEVOICE_SRC:-./VibeVoice}:/app
-      - vibevoiceHFCacheDir:/root/.cache/huggingface
-    environment:
-      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      VIBEVOICE_FFMPEG_MAX_CONCURRENCY: "32"
-      VLLM_MEDIA_LOADING_THREAD_COUNT: "8"
-      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-      PYTHONUNBUFFERED: "1"
-      VLLM_API_KEY: ${VIBEVOICE_API_KEY:-}
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "150m"
-        max-file: "3"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8005/v1/models"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 600s
-
-  # -----------------------------------------------------------------
-  # EXPERIMENTAL (profile=openai-tts): OpenAI-compatible /v1/audio/speech
-  # marhensa/vibevoice-realtime-openai-api community wrapper.
-  # Lets any OpenAI client call VibeVoice natively (Open WebUI, etc).
-  # Port 8006. If no aarch64 prebuilt exists, swap to git+runtime install.
-  # -----------------------------------------------------------------
-  vibevoice-openai-tts:
-    image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.12-py3}
-    container_name: vibevoice-openai-tts
-    hostname: vibevoice-openai-tts
-    restart: unless-stopped
-    tty: true
-    ipc: host
-    profiles: ["openai-tts"]
-    entrypoint: ["/bin/bash", "-lc"]
-    # Wrapper cloned at first boot (marker-gated).
-    # Delete /root/.vibevoice_openai_tts_installed to force re-clone.
-    command: >
-      "MARKER=/root/.vibevoice_openai_tts_installed;
-       if [ ! -f \"$$MARKER\" ]; then
-         git clone https://github.com/marhensa/vibevoice-realtime-openai-api.git /opt/vv-openai-tts || true;
-         cd /opt/vv-openai-tts && pip install --quiet -r requirements.txt && touch \"$$MARKER\";
-       fi;
-       cd /opt/vv-openai-tts && python server.py --host 0.0.0.0 --port 8006"
-    ports:
-      - "${VIBEVOICE_OPENAI_TTS_PORT:-8006}:8006"
-    volumes:
-      - vibevoiceHFCacheDir:/root/.cache/huggingface
-      - vibevoicePipCacheDir:/root/.cache/pip
-      - vibevoiceOpenAITTSDir:/opt/vv-openai-tts
-    environment:
-      HF_HOME: /root/.cache/huggingface
-      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      MODEL_PATH: ${VIBEVOICE_REALTIME_MODEL:-microsoft/VibeVoice-Realtime-0.5B}
-      PYTHONUNBUFFERED: "1"
-      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-      TORCH_CUDA_ARCH_LIST: "12.0+PTX"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "150m"
-        max-file: "3"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8006/v1/audio/voices"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 600s
-
-  # -----------------------------------------------------------------
-  # OpenAI-compat ASR (default, no profile gate). microsoft/VibeVoice-
-  # ASR-HF via a tiny FastAPI server. Exposes /v1/audio/transcriptions
-  # + /v1/models so any OpenAI STT client (Open WebUI, LibreChat,
-  # vibe-dictate, ...) can point at it. transformers>=5.3.0 is installed
-  # on first boot by scripts/openai_asr_entrypoint.sh (separate marker
-  # from the Gradio stack — that one runs transformers 4.x).
-  # -----------------------------------------------------------------
   vibevoice-asr-openai:
     image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.12-py3}
     container_name: vibevoice-asr-openai
@@ -359,11 +100,4 @@ volumes:
     driver_opts:
       type: none
       device: ${VIBEVOICE_BASE_DIR}/data/pip-cache
-      o: bind
-  vibevoiceOpenAITTSDir:
-    name: vibevoiceOpenAITTSDir
-    driver: local
-    driver_opts:
-      type: none
-      device: ${VIBEVOICE_BASE_DIR}/data/openai-tts
       o: bind

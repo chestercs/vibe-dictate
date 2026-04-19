@@ -1,0 +1,247 @@
+# ============================================================================
+#  VibeVoice experiments stack — everything the vibe-dictate dictation
+#  client does NOT need.
+#
+#  All services are profile-gated so `docker compose up -d` does nothing
+#  by default. Pick what you want:
+#
+#    docker compose --profile gradio      up -d      # legacy ASR Gradio demo on :7860
+#    docker compose --profile realtime    up -d      # realtime 0.5B TTS WebSocket on :3000
+#    docker compose --profile vllm        up -d      # experimental ASR via vLLM on :8005
+#    docker compose --profile openai-tts  up -d      # community OpenAI-compat TTS wrapper on :8006
+#
+#  Runs against either an x86_64 NVIDIA box or an aarch64 GB10 DGX Spark
+#  — swap VIBEVOICE_BASE_IMAGE between `nvcr.io/nvidia/pytorch:25.09-py3`
+#  (x86) and `nvcr.io/nvidia/pytorch:25.12-py3` (GB10 / CUDA 13). See
+#  `.env.example` for all the knobs.
+#
+#  Layout expected next to this file:
+#    vibevoice-lab/
+#      docker-compose.yml                 <- this file
+#      Dockerfile.vibevoice-gb10          <- B-opció (prebuilt) GB10 image
+#      scripts/vibevoice_entrypoint.sh    <- runtime pip install (transformers 4.x)
+#      VibeVoice/                         <- upstream microsoft/VibeVoice checkout
+#        demo/ vibevoice/ vllm_plugin/ ...
+# ============================================================================
+
+services:
+
+  # -----------------------------------------------------------------
+  # Legacy Gradio ASR demo (transformers 4.x based). Superseded by the
+  # OpenAI-compat shim in the parent vibe-dictate repo, but still
+  # around for anyone who wants the upstream UI / the speaker-diarized
+  # structured output.
+  # -----------------------------------------------------------------
+  vibevoice-asr:
+    image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}
+    container_name: vibevoice-asr
+    hostname: vibevoice-asr
+    profiles: ["gradio"]
+    restart: unless-stopped
+    tty: true
+    ipc: host
+    entrypoint: ["/bin/bash", "/workspace/lab-scripts/vibevoice_entrypoint.sh"]
+    command: >
+      python demo/vibevoice_asr_gradio_demo.py
+      --model_path ${VIBEVOICE_ASR_MODEL:-microsoft/VibeVoice-ASR}
+      --host 0.0.0.0
+      --port 7860
+      --attn_implementation ${VIBEVOICE_ATTN:-sdpa}
+      --max_new_tokens ${VIBEVOICE_MAX_NEW_TOKENS:-8192}
+    working_dir: /workspace/VibeVoice
+    ports:
+      - "${VIBEVOICE_ASR_PORT:-7860}:7860"
+    volumes:
+      - ${VIBEVOICE_SRC:-./VibeVoice}:/workspace/VibeVoice
+      - ./scripts:/workspace/lab-scripts:ro
+      - vibevoiceLabHFCache:/root/.cache/huggingface
+      - vibevoiceLabPipCache:/root/.cache/pip
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      TRANSFORMERS_CACHE: /root/.cache/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      TRANSFORMERS_VERBOSITY: error
+      GRADIO_SERVER_NAME: 0.0.0.0
+      PYTHONUNBUFFERED: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-}
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7860/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+
+  # -----------------------------------------------------------------
+  # Realtime 0.5B TTS WebSocket endpoint. This is TTS, not STT — it
+  # lives here because it shares the VibeVoice checkout + runtime-
+  # install pattern with the rest of the lab services.
+  # -----------------------------------------------------------------
+  vibevoice-realtime:
+    image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}
+    container_name: vibevoice-realtime
+    hostname: vibevoice-realtime
+    profiles: ["realtime"]
+    restart: unless-stopped
+    tty: true
+    ipc: host
+    entrypoint: ["/bin/bash", "/workspace/lab-scripts/vibevoice_entrypoint.sh"]
+    command: >
+      python demo/vibevoice_realtime_demo.py
+      --model_path ${VIBEVOICE_REALTIME_MODEL:-microsoft/VibeVoice-Realtime-0.5B}
+      --device cuda
+      --port 3000
+    working_dir: /workspace/VibeVoice
+    ports:
+      - "${VIBEVOICE_REALTIME_PORT:-3000}:3000"
+    volumes:
+      - ${VIBEVOICE_SRC:-./VibeVoice}:/workspace/VibeVoice
+      - ./scripts:/workspace/lab-scripts:ro
+      - vibevoiceLabHFCache:/root/.cache/huggingface
+      - vibevoiceLabPipCache:/root/.cache/pip
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      TRANSFORMERS_CACHE: /root/.cache/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      MODEL_PATH: ${VIBEVOICE_REALTIME_MODEL:-microsoft/VibeVoice-Realtime-0.5B}
+      MODEL_DEVICE: cuda
+      PYTHONUNBUFFERED: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-}
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 400s
+
+  # -----------------------------------------------------------------
+  # Experimental vLLM-backed ASR. Needs an sm_121-compatible vLLM
+  # image on GB10; on x86 the upstream vllm/vllm-openai:v0.14.1 works.
+  # -----------------------------------------------------------------
+  vibevoice-vllm-asr:
+    image: ${VIBEVOICE_VLLM_IMAGE:-vllm/vllm-openai:v0.14.1}
+    container_name: vibevoice-vllm-asr
+    hostname: vibevoice-vllm-asr
+    profiles: ["vllm"]
+    restart: unless-stopped
+    tty: true
+    ipc: host
+    entrypoint: ["bash", "-lc"]
+    command: >
+      "python3 /app/vllm_plugin/scripts/start_server.py
+        --model ${VIBEVOICE_ASR_MODEL:-microsoft/VibeVoice-ASR}
+        --port 8005
+        --tp 1 --dp 1
+        --max-num-seqs ${VIBEVOICE_VLLM_MAX_SEQS:-16}
+        --max-model-len ${VIBEVOICE_VLLM_MAX_MODEL_LEN:-65536}
+        --gpu-memory-utilization ${VIBEVOICE_VLLM_MEM_UTIL:-0.18}"
+    working_dir: /app
+    ports:
+      - "${VIBEVOICE_VLLM_PORT:-8005}:8005"
+    volumes:
+      - ${VIBEVOICE_SRC:-./VibeVoice}:/app
+      - vibevoiceLabHFCache:/root/.cache/huggingface
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      VIBEVOICE_FFMPEG_MAX_CONCURRENCY: "32"
+      VLLM_MEDIA_LOADING_THREAD_COUNT: "8"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      PYTHONUNBUFFERED: "1"
+      VLLM_API_KEY: ${VIBEVOICE_VLLM_API_KEY:-}
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8005/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 600s
+
+  # -----------------------------------------------------------------
+  # Community OpenAI-compat TTS wrapper (marhensa/vibevoice-realtime-
+  # openai-api). Exposes /v1/audio/speech around VibeVoice-Realtime-0.5B.
+  # Cloned into its own volume on first boot (marker-gated).
+  # -----------------------------------------------------------------
+  vibevoice-openai-tts:
+    image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}
+    container_name: vibevoice-openai-tts
+    hostname: vibevoice-openai-tts
+    profiles: ["openai-tts"]
+    restart: unless-stopped
+    tty: true
+    ipc: host
+    entrypoint: ["/bin/bash", "-lc"]
+    command: >
+      "MARKER=/root/.vibevoice_openai_tts_installed;
+       if [ ! -f \"$$MARKER\" ]; then
+         git clone https://github.com/marhensa/vibevoice-realtime-openai-api.git /opt/vv-openai-tts || true;
+         cd /opt/vv-openai-tts && pip install --quiet -r requirements.txt && touch \"$$MARKER\";
+       fi;
+       cd /opt/vv-openai-tts && python server.py --host 0.0.0.0 --port 8006"
+    ports:
+      - "${VIBEVOICE_OPENAI_TTS_PORT:-8006}:8006"
+    volumes:
+      - vibevoiceLabHFCache:/root/.cache/huggingface
+      - vibevoiceLabPipCache:/root/.cache/pip
+      - vibevoiceLabOpenAITTSDir:/opt/vv-openai-tts
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      MODEL_PATH: ${VIBEVOICE_REALTIME_MODEL:-microsoft/VibeVoice-Realtime-0.5B}
+      PYTHONUNBUFFERED: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-}
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8006/v1/audio/voices"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+
+volumes:
+  vibevoiceLabHFCache:
+  vibevoiceLabPipCache:
+  vibevoiceLabOpenAITTSDir:

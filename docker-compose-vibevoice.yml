@@ -1,132 +1,30 @@
 # ============================================================================
-#  VibeVoice backend — x86_64 fallback stack (NVIDIA RTX / consumer GPUs).
+#  VibeVoice STT backend for vibe-dictate — x86_64 (NVIDIA consumer GPUs).
+#
+#  Exposes the OpenAI Audio API (/v1/audio/transcriptions) backed by
+#  microsoft/VibeVoice-ASR-HF. Any OpenAI-compat STT client (Open WebUI,
+#  LibreChat, vibe-dictate, the OpenAI SDK, ...) can point at it.
 #
 #  Runtime-install pattern (no docker build):
 #    - Base image: nvcr.io/nvidia/pytorch:25.09-py3  (CUDA 12.x, amd64)
-#    - First start: scripts/vibevoice_entrypoint.sh pip-installs VibeVoice
-#      deps into the container; marker file makes restarts fast.
+#    - First start: scripts/openai_asr_entrypoint.sh pip-installs
+#      transformers>=5.3 + the FastAPI stack. Marker file at
+#      /root/.vibevoice_openai_installed makes restarts fast.
 #
-#  Layout expected by the mounts below:
-#    vibe-dictate/                      <- compose file lives here
-#      docker-compose-vibevoice.yml
-#      scripts/vibevoice_entrypoint.sh
-#      VibeVoice/                       <- upstream VibeVoice checkout
-#        demo/ vibevoice/ vllm_plugin/ ...
+#  Start:
+#    cp .env.vibevoice.example .env
+#    docker compose -f docker-compose-vibevoice.yml up -d
+#    # OpenAI-compat endpoint on http://localhost:8080
 #
-#  Set VIBEVOICE_SRC in .env to override the upstream location (e.g. if
-#  you keep VibeVoice at a shared path instead of inside vibe-dictate).
-#
-#  Services:
-#    docker compose up -d                      # OpenAI-compat ASR on :8080 (default)
-#    docker compose --profile gradio up -d     # also Gradio ASR demo on :7860
-#    docker compose --profile realtime up -d   # also realtime TTS on :3001
+#  The VibeVoice upstream checkout is NOT required for this stack —
+#  transformers 5.3+ carries VibeVoiceAsrForConditionalGeneration natively.
+#  For the Gradio demo / realtime TTS / vLLM experiments see the
+#  `vibevoice-lab/` folder (split out so it can be lifted into its own
+#  project).
 # ============================================================================
 
 services:
 
-  vibevoice-asr:
-    image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}
-    container_name: vibevoice-asr
-    profiles: ["gradio"]
-    restart: unless-stopped
-    tty: true
-    ipc: host
-    entrypoint: ["/bin/bash", "/workspace/vibe-dictate-scripts/vibevoice_entrypoint.sh"]
-    command: >
-      python demo/vibevoice_asr_gradio_demo.py
-      --model_path ${VIBEVOICE_ASR_MODEL:-microsoft/VibeVoice-ASR}
-      --host 0.0.0.0
-      --port 7860
-      --attn_implementation ${VIBEVOICE_ATTN:-sdpa}
-      --max_new_tokens ${VIBEVOICE_MAX_NEW_TOKENS:-8192}
-    working_dir: /workspace/VibeVoice
-    ports:
-      - "${VIBEVOICE_ASR_PORT:-7860}:7860"
-    volumes:
-      - ${VIBEVOICE_SRC:-./VibeVoice}:/workspace/VibeVoice
-      - ./scripts:/workspace/vibe-dictate-scripts:ro
-      - vibevoiceHFCache:/root/.cache/huggingface
-      - vibevoicePipCache:/root/.cache/pip
-    environment:
-      HF_HOME: /root/.cache/huggingface
-      TRANSFORMERS_CACHE: /root/.cache/huggingface
-      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      TRANSFORMERS_VERBOSITY: error
-      GRADIO_SERVER_NAME: 0.0.0.0
-      GRADIO_MCP_SERVER: "True"
-      PYTHONUNBUFFERED: "1"
-      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-    ulimits:
-      memlock: -1
-      stack: -1
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:7860/"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 600s
-
-  vibevoice-realtime:
-    image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}
-    container_name: vibevoice-realtime
-    profiles: ["realtime"]
-    restart: unless-stopped
-    tty: true
-    ipc: host
-    entrypoint: ["/bin/bash", "/workspace/vibe-dictate-scripts/vibevoice_entrypoint.sh"]
-    command: >
-      python demo/vibevoice_realtime_demo.py
-      --model_path ${VIBEVOICE_REALTIME_MODEL:-microsoft/VibeVoice-Realtime-0.5B}
-      --port 3000
-    working_dir: /workspace/VibeVoice
-    ports:
-      - "${VIBEVOICE_REALTIME_PORT:-3001}:3000"
-    volumes:
-      - ${VIBEVOICE_SRC:-./VibeVoice}:/workspace/VibeVoice
-      - ./scripts:/workspace/vibe-dictate-scripts:ro
-      - vibevoiceHFCache:/root/.cache/huggingface
-      - vibevoicePipCache:/root/.cache/pip
-    environment:
-      HF_HOME: /root/.cache/huggingface
-      TRANSFORMERS_CACHE: /root/.cache/huggingface
-      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-      TRANSFORMERS_VERBOSITY: error
-      PYTHONUNBUFFERED: "1"
-      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-    ulimits:
-      memlock: -1
-      stack: -1
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:3000/"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 400s
-
-  # ---------------------------------------------------------------------
-  # OpenAI-compat ASR (default, no profile gate). microsoft/VibeVoice-
-  # ASR-HF via a tiny FastAPI server. Exposes /v1/audio/transcriptions
-  # + /v1/models so any OpenAI STT client (Open WebUI, LibreChat,
-  # vibe-dictate, ...) can point at it. transformers>=5.3.0 is installed
-  # on first boot by scripts/openai_asr_entrypoint.sh (separate marker
-  # from the Gradio stack — that one runs transformers 4.x).
-  # ---------------------------------------------------------------------
   vibevoice-asr-openai:
     image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}
     container_name: vibevoice-asr-openai
