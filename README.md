@@ -2,6 +2,10 @@
 
 ![vibe-dictate tray menu](assets/tray-menu.png)
 
+<video src="https://github.com/chestercs/vibe-dictate/raw/main/assets/demo.mp4" controls muted loop></video>
+
+> 🎬 Short demo: [`assets/demo.mp4`](assets/demo.mp4) (inline player on GitHub; plain download on the Gitea mirror).
+
 A Windows tray-resident dictation tool that talks to any
 **OpenAI-compatible** speech-to-text server — most notably Microsoft's
 **VibeVoice ASR**, but also OpenAI Whisper itself, self-hosted Whisper
