@@ -6,7 +6,7 @@ use arboard::Clipboard;
 use windows::Win32::Foundation::GetLastError;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_V,
+    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_RETURN, VK_V,
 };
 
 pub fn clipboard_paste(text: &str) -> Result<()> {
@@ -78,6 +78,24 @@ fn send_ctrl_v() -> Result<()> {
     ];
     unsafe {
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+    Ok(())
+}
+
+/// Inject a single Return keypress. Used after the text injection when the
+/// user has `output.send_enter = true` (chat clients, terminals where the
+/// dictation is also the "send" gesture). VK_RETURN works in both
+/// SendInput and clipboard-paste modes — the clipboard path can't carry a
+/// reliable newline, so we always fall back to a real keystroke here.
+pub fn send_enter() -> Result<()> {
+    let inputs = [
+        make_vk_input(VK_RETURN, false),
+        make_vk_input(VK_RETURN, true),
+    ];
+    let n = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if (n as usize) < inputs.len() {
+        let err = unsafe { GetLastError() };
+        log::warn!("SendInput VK_RETURN dropped ({}/{} events, err {:?})", n, inputs.len(), err);
     }
     Ok(())
 }

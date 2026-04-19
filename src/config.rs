@@ -128,6 +128,12 @@ pub const HOTKEY_OPTIONS: &[&str] =
 pub struct OutputConfig {
     pub mode: OutputMode,
     pub trailing_space: bool,
+    /// If true, inject a Return keypress after the transcription. Useful for
+    /// chat clients / terminals where the user wants the message sent
+    /// immediately. Default false because most editors don't want a stray
+    /// newline appended to dictated text.
+    #[serde(default)]
+    pub send_enter: bool,
 }
 
 impl Default for OutputConfig {
@@ -135,6 +141,7 @@ impl Default for OutputConfig {
         Self {
             mode: OutputMode::Clipboard,
             trailing_space: true,
+            send_enter: false,
         }
     }
 }

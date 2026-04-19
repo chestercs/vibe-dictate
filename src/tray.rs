@@ -17,6 +17,7 @@ const ID_RELOAD: &str = "vd:reload";
 const ID_AUTOSTART: &str = "vd:autostart";
 const ID_OUT_CLIPBOARD: &str = "vd:out:clipboard";
 const ID_OUT_SENDINPUT: &str = "vd:out:sendinput";
+const ID_OUT_SEND_ENTER: &str = "vd:out:send_enter";
 const ID_OPEN_LOG: &str = "vd:open:log";
 const ID_OPEN_CONFIG: &str = "vd:open:config";
 const ID_HOTKEY_CAPTURE: &str = "vd:hotkey:__capture__";
@@ -304,6 +305,15 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
     menu.append(&mode_clipboard)?;
     menu.append(&mode_sendinput)?;
 
+    let send_enter = CheckMenuItem::with_id(
+        MenuId::new(ID_OUT_SEND_ENTER),
+        "Append Enter after dictation",
+        true,
+        cfg.output.send_enter,
+        None,
+    );
+    menu.append(&send_enter)?;
+
     menu.append(&PredefinedMenuItem::separator())?;
 
     let open_log = MenuItem::with_id(MenuId::new(ID_OPEN_LOG), "Open log file", true, None);
@@ -421,6 +431,13 @@ pub fn handle_menu_event(
         c.output.mode = OutputMode::Sendinput;
         c.save()?;
         log::info!("Output mode: SendInput");
+        outcome.menu_dirty = true;
+    } else if id == ID_OUT_SEND_ENTER {
+        let mut c = cfg.lock().unwrap();
+        c.output.send_enter = !c.output.send_enter;
+        let new_val = c.output.send_enter;
+        c.save()?;
+        log::info!("Append Enter after dictation: {}", new_val);
         outcome.menu_dirty = true;
     } else if id == ID_OPEN_LOG {
         let p = Config::log_path()?;

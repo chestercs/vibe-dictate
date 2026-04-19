@@ -664,6 +664,9 @@ fn send_and_inject(
         OutputMode::Clipboard => injector::clipboard_paste(&out)?,
         OutputMode::Sendinput => injector::send_input_text(&out)?,
     }
+    if output_cfg.send_enter {
+        injector::send_enter()?;
+    }
     Ok(())
 }
 
