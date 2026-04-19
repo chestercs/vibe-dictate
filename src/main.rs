@@ -10,6 +10,14 @@ use std::time::{Duration, Instant};
 /// take >500ms between press-events) won't be read as a cancel.
 const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(400);
 
+/// Max gap between the previous Release and a fresh Press that still
+/// counts as "cancel the in-flight transcription". Covers the common case
+/// where the user released, saw the orange tray / realized it's wrong,
+/// and slapped the key again to take it back. Widely enough above
+/// DOUBLE_TAP_WINDOW that a deliberate rapid second dictation (>500ms
+/// after release) isn't swallowed as cancel.
+const PROCESSING_CANCEL_WINDOW: Duration = Duration::from_millis(500);
+
 /// How long the red "cancelled" icon stays up after a double-tap before
 /// snapping back to idle blue. Short and sharp — the user wants a quick
 /// ack, not a lingering error state.
@@ -179,6 +187,12 @@ fn main() -> Result<()> {
     // that's the "still in flight" cancel window. `in_flight` tells the
     // Pressed handler whether there is actually something to cancel.
     let last_press_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    // Timestamp of the previous successful Release (the point where the
+    // recording ended and was handed to the network worker). The Press
+    // handler checks it to detect "processing-cancel" — a single quick
+    // re-press within PROCESSING_CANCEL_WINDOW after release → drop the
+    // in-flight transcription instead of starting a new one.
+    let last_release_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let cancel_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let in_flight: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     // When Some(t), the tray should show the red cancel-flash icon until `t`;
@@ -210,6 +224,7 @@ fn main() -> Result<()> {
     let recorder_loop = recorder.clone();
     let press_time_loop = press_time.clone();
     let last_press_at_loop = last_press_at.clone();
+    let last_release_at_loop = last_release_at.clone();
     let cancel_flag_loop = cancel_flag.clone();
     let in_flight_loop = in_flight.clone();
     let flash_until_loop = flash_until.clone();
@@ -478,24 +493,38 @@ fn main() -> Result<()> {
                                 recorder_loop.lock().unwrap().is_some();
                             let currently_in_flight =
                                 in_flight_loop.load(Ordering::SeqCst);
+                            // Quick-press-after-release cancel: user just
+                            // released, saw the processing state, and
+                            // slammed the key again to take it back. Only
+                            // valid when there's no live recording and the
+                            // last release is still fresh.
+                            let last_release =
+                                *last_release_at_loop.lock().unwrap();
+                            let is_processing_cancel = !currently_recording
+                                && currently_in_flight
+                                && last_release
+                                    .map(|t| {
+                                        now.duration_since(t)
+                                            <= PROCESSING_CANCEL_WINDOW
+                                    })
+                                    .unwrap_or(false);
 
-                            if is_double_tap
-                                && (currently_recording || currently_in_flight)
-                            {
-                                // Cancel path — drop any live recording and arm the
-                                // flag so the in-flight worker (if any) skips paste
-                                // once Gradio returns.
+                            if is_processing_cancel {
                                 cancel_flag_loop.store(true, Ordering::SeqCst);
-                                let dropped = {
-                                    let mut slot = recorder_loop.lock().unwrap();
-                                    slot.take().is_some()
-                                };
+                                *last_release_at_loop.lock().unwrap() = None;
+                                log::info!(
+                                    "Fast-press cancel: in-flight transcription will be dropped"
+                                );
+                                *flash_until_loop.lock().unwrap() =
+                                    Some(Instant::now() + CANCEL_FLASH_DURATION);
+                            } else if is_double_tap && currently_recording {
+                                // Classic in-recording cancel (rec still live).
+                                cancel_flag_loop.store(true, Ordering::SeqCst);
+                                let mut slot = recorder_loop.lock().unwrap();
+                                let dropped = slot.take().is_some();
+                                drop(slot);
                                 if dropped {
                                     log::info!("Double-tap cancel: recording aborted");
-                                } else if currently_in_flight {
-                                    log::info!(
-                                        "Double-tap cancel: in-flight transcription will be dropped"
-                                    );
                                 }
                                 *press_time_loop.lock().unwrap() = None;
                                 *flash_until_loop.lock().unwrap() =
@@ -528,6 +557,10 @@ fn main() -> Result<()> {
                         PushAction::Release => {
                             let rec = recorder_loop.lock().unwrap().take();
                             let started = press_time_loop.lock().unwrap().take();
+                            // Remember this release so a follow-up quick
+                            // press within PROCESSING_CANCEL_WINDOW can
+                            // cancel the in-flight transcription.
+                            *last_release_at_loop.lock().unwrap() = Some(Instant::now());
                             if let Some(r) = rec {
                                 let duration = started
                                     .map(|t| t.elapsed())
