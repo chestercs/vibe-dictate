@@ -2,11 +2,14 @@
 # =============================================================================
 #  Bootstraps the VibeVoice backend next to vibe-dictate.
 #
+#  Default service is the OpenAI-compat ASR shim (port 8080). The legacy
+#  Gradio demo is still in both compose files behind `--profile gradio`.
+#
 #  Steps (all idempotent):
 #    1. Clone (or update) microsoft/VibeVoice into ./VibeVoice/
 #    2. Copy the matching .env.*.example → .env if missing
 #    3. Pre-pull the compose-referenced base image
-#    4. Optional: build the B-opció Dockerfile (GB10, --build)
+#    4. Optional: build the B-opció Dockerfile (GB10 prebuilt, --build)
 #    5. Optional: docker compose up -d (--up)
 #
 #  Usage:

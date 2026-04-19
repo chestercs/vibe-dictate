@@ -275,14 +275,12 @@ services:
       start_period: 600s
 
   # -----------------------------------------------------------------
-  # OpenAI-compat ASR (profile=openai). microsoft/VibeVoice-ASR-HF via
-  # a tiny FastAPI server. Exposes /v1/audio/transcriptions + /v1/models
-  # so any OpenAI STT client (Open WebUI, LibreChat, vibe-dictate, ...)
-  # can point at it. transformers>=5.3.0 is installed on first boot by
-  # scripts/openai_asr_entrypoint.sh (separate marker from the Gradio
-  # stack — that one runs transformers 4.x). Opt-in via --profile openai
-  # because it competes with vibevoice-asr for the ~20 GB GPU budget
-  # left after Gemma.
+  # OpenAI-compat ASR (default, no profile gate). microsoft/VibeVoice-
+  # ASR-HF via a tiny FastAPI server. Exposes /v1/audio/transcriptions
+  # + /v1/models so any OpenAI STT client (Open WebUI, LibreChat,
+  # vibe-dictate, ...) can point at it. transformers>=5.3.0 is installed
+  # on first boot by scripts/openai_asr_entrypoint.sh (separate marker
+  # from the Gradio stack — that one runs transformers 4.x).
   # -----------------------------------------------------------------
   vibevoice-asr-openai:
     image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.12-py3}

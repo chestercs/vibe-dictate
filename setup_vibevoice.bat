@@ -3,6 +3,8 @@ rem ============================================================================
 rem  Bootstraps the VibeVoice backend on Windows (Docker Desktop host).
 rem
 rem  Mirrors setup_vibevoice.sh. Default --arch x86 since GB10 is Linux-only.
+rem  Default service is the OpenAI-compat ASR shim (port 8080); the legacy
+rem  Gradio demo is gated behind `docker compose --profile gradio up -d`.
 rem
 rem  Usage:
 rem    setup_vibevoice.bat                   :: x86 stack, clone + pull

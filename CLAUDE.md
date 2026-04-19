@@ -5,10 +5,13 @@ when starting a new conversation in the `vibe-dictate/` repo root.
 
 ## Project at a glance
 
-- **What**: Windows tray-resident push-to-talk dictation client for
-  VibeVoice ASR (Microsoft's open-source ~7B speech model).
+- **What**: Windows tray-resident push-to-talk dictation client that
+  talks to any OpenAI-compatible STT server (`POST
+  /v1/audio/transcriptions`). Primary backend target: Microsoft's
+  VibeVoice-ASR-HF (~8B) via a small FastAPI shim in this repo.
 - **Why**: Hungarian dictation, but works in any of the 50+ languages
-  VibeVoice-ASR supports.
+  VibeVoice-ASR supports — and against any other OpenAI-compat STT
+  (OpenAI Whisper, self-hosted vLLM, Open WebUI, Azure Foundry, ...).
 - **Where it lives**: the vibe-dictate git repo lives at
   `git.petyuspolisz.com/chestercs/vibe-dictate.git` (branch `main`, push
   there). On Peter's dev box it physically sits at
@@ -21,8 +24,8 @@ when starting a new conversation in the `vibe-dictate/` repo root.
       `github.com/microsoft/VibeVoice`. Never push there.
 - **Build**: cross-compile via Docker from this repo's root. No Rust
   toolchain needed on the host.
-- **Status**: v0.1 feature-complete (see README "Funkciók" / "Tray menu
-  reference"). No automated tests; smoke-test manually in real apps.
+- **Status**: v0.2 — OpenAI-compat rewrite of the transport (was Gradio
+  SSE in v0.1). No automated tests; smoke-test manually in real apps.
 
 ## User profile
 
@@ -136,7 +139,7 @@ Release note structure (what v0.1.0 used, keep consistent):
 - **Highlights** bullets for this version's notable changes.
 - **Install** section pointing at the asset, short system requirements.
 - **Known limitations** (carry over the stable list: UIPI + elevated
-  windows, Alt-only hotkey auto-migration, no Azure Foundry OpenAI-compat).
+  windows, Alt-only hotkey auto-migration).
 - **Build from source** one-liner.
 
 ### Quick repo orientation
@@ -144,7 +147,7 @@ Release note structure (what v0.1.0 used, keep consistent):
 ```
 src/main.rs            # tao event loop, BindingManager, dispatch glue
 src/audio.rs           # cpal/WASAPI capture, hound WAV encoding
-src/gradio.rs          # reqwest blocking client (upload + call + SSE)
+src/openai.rs          # reqwest blocking client (single multipart POST)
 src/injector.rs        # arboard clipboard + windows-rs SendInput
 src/tray.rs            # tray-icon menu construction + handlers
 src/hotkey_capture.rs  # Win32 modal: captures next keypress / mouse click
@@ -154,6 +157,14 @@ src/config.rs          # TOML serde + ProjectDirs paths + migrations
 src/autostart.rs       # HKCU\...\Run toggle
 src/singleton.rs       # named-mutex single-instance lock
 ```
+
+Repo also ships the backend plumbing: `scripts/openai_asr_server.py`
+(FastAPI shim that exposes VibeVoice-ASR-HF as `/v1/audio/transcriptions`),
+`scripts/openai_asr_entrypoint.sh` (runtime transformers>=5.3 install),
+the x86/GB10 compose files, `Dockerfile.vibevoice-gb10` (B-opció prebuilt
+image for GB10 — still points at the legacy Gradio demo CMD; if we move
+the backend to GB10 with OpenAI-compat we'll need a separate Dockerfile
+or a CMD swap here).
 
 ## Architecture notes
 
@@ -168,7 +179,8 @@ src/singleton.rs       # named-mutex single-instance lock
    { Press, Release }` queue.
 4. Press → start audio capture (cpal Stream lives on a worker thread).
 5. Release → stop capture, encode WAV, hand to a network worker thread.
-6. Network worker → `gradio::transcribe()` → text → `injector::*`.
+6. Network worker → `openai::SttClient::transcribe()` (one multipart
+   POST to `/v1/audio/transcriptions`) → text → `injector::*`.
 
 ### BindingManager
 
@@ -207,9 +219,11 @@ stream across threads — the type system enforces this.
 
 ### TLS / CA handling
 
-`gradio::GradioClient::new` reads `extra_ca_cert` from the config and
-adds it to reqwest's rustls store on top of system roots. Single PEM
-or concatenated bundle — both work.
+`openai::SttClient::new` reads `server.extra_ca_cert` from the config
+and adds it to reqwest's rustls store on top of system roots. Single
+PEM or concatenated bundle — both work. Set it when pointing at a
+remote backend with an internal/self-signed CA (Tailscale funnel,
+corporate proxy, …).
 
 ### Why blocking reqwest, not async
 
@@ -250,6 +264,9 @@ there's a concrete need.
 | Tray icon stuck on red after cancel-flash | `flash_until` not cleared on next press. Already fixed; if it recurs, it's a regression in `main.rs` flash handling. |
 | Hungarian transcription comes back in English | `language_hint` not set, or `context_info` doesn't anchor language. Defaults handle this — check config wasn't reset. |
 | `cpal` panics on device init | The configured `audio.mic_device` no longer exists (mic unplugged). Reset to system default. |
+| `transcribe failed: HTTP 404` | `server.base_url` wrong or endpoint doesn't expose `/v1/audio/transcriptions`. `curl $base_url/v1/models`. |
+| `transcribe failed: HTTP 401/403` | Missing / wrong bearer. Set `server.api_key` (tray → STT server → API key). |
+| Stale `[gradio]` section in config.toml | v0.1 → v0.2 aliases cover it; first save rewrites to `[server]`. Trigger via tray → Reload config then any setting change. |
 
 ## Things NOT to do
 
@@ -264,9 +281,30 @@ there's a concrete need.
 - **Don't add `.unwrap()` in error paths**. Use `?` + `.context()`.
 - **Don't add comments that describe WHAT the code does**. The code
   describes what. Comments are for why.
+- **Don't `docker compose down -v` casually** — the `-v` nukes the
+  `vibevoiceHFCache` named volume, which holds the ~16 GB VibeVoice-
+  ASR-HF weights. Plain `down` keeps the volume; deleting the cache is
+  always a multi-minute re-download.
 
 ## Recent decisions worth remembering
 
+- **v0.2 transport is OpenAI-compat, not Gradio**. Client does one
+  multipart `POST /v1/audio/transcriptions` (see `src/openai.rs`); no
+  more upload + call + SSE. Backend side is `scripts/openai_asr_server.py`
+  (FastAPI + `VibeVoiceAsrForConditionalGeneration`). The legacy Gradio
+  service still builds and runs, but it's behind `--profile gradio` in
+  both compose files — users won't touch it unless they ask for it.
+- **Config `[gradio]` → `[server]` with serde aliases**. Old fields
+  (`url`, `api_token`) still load, get rewritten on first save. A
+  one-shot migration also bumps the legacy `http://localhost:7860`
+  default to `http://localhost:8080`. See `Config::migrate_in_place`.
+- **Model weights live in a named Docker volume** (`vibevoiceHFCache` /
+  `vibevoiceHFCacheDir`). `docker compose down` keeps them. Explicit
+  `docker volume rm` or `down -v` is the only way to lose them.
+- **`Dockerfile.vibevoice-gb10` is legacy-Gradio-flavored**. Its CMD
+  runs `demo/vibevoice_asr_gradio_demo.py`, not the OpenAI shim. If we
+  eventually move the backend to GB10 with the OpenAI shim as a
+  prebuilt image, either swap the CMD or ship a second Dockerfile.
 - **SendInput is batched**, not per-character. Per-character hammering
   raced with browser/terminal message pumps and dropped events.
   See `injector::send_input_text` — single call, chunked at 100 events,
