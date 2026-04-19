@@ -1,5 +1,7 @@
 # vibe-dictate
 
+![vibe-dictate tray menu](assets/tray-menu.png)
+
 A Windows tray-resident push-to-talk dictation tool that talks to any
 **OpenAI-compatible** speech-to-text server — most notably Microsoft's
 **VibeVoice ASR**, but also OpenAI Whisper itself, self-hosted Whisper
