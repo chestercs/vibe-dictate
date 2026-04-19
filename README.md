@@ -118,18 +118,18 @@ vibe-dictate/                        <- this repo
   .env.vibevoice.example             <- copy to .env for x86_64
   .env.vibevoice-gb10.example        <- copy to .env for GB10
   src/                               <- Rust client source
-  vibe-voice/                        <- upstream microsoft/VibeVoice (gitignored)
+  VibeVoice/                         <- upstream microsoft/VibeVoice (gitignored)
     demo/ vibevoice/ vllm_plugin/ ...
 ```
 
-Clone the upstream repo into `vibe-voice/`:
+Clone the upstream repo into `VibeVoice/`:
 
 ```bash
-git clone https://github.com/microsoft/VibeVoice vibe-voice
+git clone https://github.com/microsoft/VibeVoice VibeVoice
 ```
 
 Override the default via `VIBEVOICE_SRC=/abs/path` in your `.env` if you
-keep the upstream tree elsewhere (shared disk, legacy layout, etc.).
+keep the upstream tree elsewhere (shared disk, etc.).
 
 ### Option A — local Docker (RTX 4090 / dev workstation)
 
@@ -531,7 +531,6 @@ rm "$APPDATA\chestercs\vibe-dictate\config\config.toml"
 **Bump dependencies**:
 
 ```bash
-cd tools/vibe-dictate
 cargo update --dry-run    # see what would change
 cargo update
 # rebuild + smoke-test

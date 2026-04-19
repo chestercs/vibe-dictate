@@ -6,7 +6,7 @@
 #  Activate by replacing the `image:` line in
 #  docker-compose-vibevoice-asr-gb10.yml with a build block:
 #      build:
-#        context: ${VIBEVOICE_SRC:-./vibe-voice}
+#        context: ${VIBEVOICE_SRC:-./VibeVoice}
 #        dockerfile: ../Dockerfile.vibevoice-gb10
 #      image: vibevoice-gb10:latest
 #  (context = VibeVoice upstream tree; dockerfile path is relative to it.)

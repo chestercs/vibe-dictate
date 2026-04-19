@@ -21,14 +21,14 @@
 #  VibeVoice into the container (~2 min) behind a marker file.
 #
 #  B-opció (faster restarts): use Dockerfile.vibevoice-gb10 — swap the
-#  `image:` line below for a `build: { context: ${VIBEVOICE_SRC:-./vibe-voice},
+#  `image:` line below for a `build: { context: ${VIBEVOICE_SRC:-./VibeVoice},
 #  dockerfile: ../Dockerfile.vibevoice-gb10 }` block.
 #
 #  Layout expected:
 #    vibe-dictate/                      <- compose file lives here
 #      docker-compose-vibevoice-asr-gb10.yml
 #      scripts/vibevoice_entrypoint.sh
-#      vibe-voice/                      <- upstream VibeVoice checkout
+#      VibeVoice/                       <- upstream VibeVoice checkout
 #        demo/ vibevoice/ vllm_plugin/ ...
 # ============================================================================
 
@@ -57,7 +57,7 @@ services:
     ports:
       - "${VIBEVOICE_ASR_PORT:-7860}:7860"
     volumes:
-      - ${VIBEVOICE_SRC:-./vibe-voice}:/workspace/VibeVoice
+      - ${VIBEVOICE_SRC:-./VibeVoice}:/workspace/VibeVoice
       - ./scripts:/workspace/vibe-dictate-scripts:ro
       - vibevoiceHFCacheDir:/root/.cache/huggingface
       - vibevoiceTorchCacheDir:/root/.cache/torch
@@ -117,7 +117,7 @@ services:
     ports:
       - "${VIBEVOICE_REALTIME_PORT:-3000}:3000"
     volumes:
-      - ${VIBEVOICE_SRC:-./vibe-voice}:/workspace/VibeVoice
+      - ${VIBEVOICE_SRC:-./VibeVoice}:/workspace/VibeVoice
       - ./scripts:/workspace/vibe-dictate-scripts:ro
       - vibevoiceHFCacheDir:/root/.cache/huggingface
       - vibevoiceTorchCacheDir:/root/.cache/torch
@@ -180,7 +180,7 @@ services:
     ports:
       - "${VIBEVOICE_VLLM_PORT:-8005}:8005"
     volumes:
-      - ${VIBEVOICE_SRC:-./vibe-voice}:/app
+      - ${VIBEVOICE_SRC:-./VibeVoice}:/app
       - vibevoiceHFCacheDir:/root/.cache/huggingface
     environment:
       HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}

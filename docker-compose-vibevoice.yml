@@ -10,7 +10,7 @@
 #    vibe-dictate/                      <- compose file lives here
 #      docker-compose-vibevoice.yml
 #      scripts/vibevoice_entrypoint.sh
-#      vibe-voice/                      <- upstream VibeVoice checkout
+#      VibeVoice/                       <- upstream VibeVoice checkout
 #        demo/ vibevoice/ vllm_plugin/ ...
 #
 #  Set VIBEVOICE_SRC in .env to override the upstream location (e.g. if
@@ -42,7 +42,7 @@ services:
     ports:
       - "${VIBEVOICE_ASR_PORT:-7860}:7860"
     volumes:
-      - ${VIBEVOICE_SRC:-./vibe-voice}:/workspace/VibeVoice
+      - ${VIBEVOICE_SRC:-./VibeVoice}:/workspace/VibeVoice
       - ./scripts:/workspace/vibe-dictate-scripts:ro
       - vibevoiceHFCache:/root/.cache/huggingface
       - vibevoicePipCache:/root/.cache/pip
@@ -89,7 +89,7 @@ services:
     ports:
       - "${VIBEVOICE_REALTIME_PORT:-3001}:3000"
     volumes:
-      - ${VIBEVOICE_SRC:-./vibe-voice}:/workspace/VibeVoice
+      - ${VIBEVOICE_SRC:-./VibeVoice}:/workspace/VibeVoice
       - ./scripts:/workspace/vibe-dictate-scripts:ro
       - vibevoiceHFCache:/root/.cache/huggingface
       - vibevoicePipCache:/root/.cache/pip
