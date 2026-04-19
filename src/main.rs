@@ -19,6 +19,22 @@ const CANCEL_FLASH_DURATION: Duration = Duration::from_millis(500);
 /// walk away, the capture auto-cancels and the prior hotkey is restored.
 const HOTKEY_CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How long the red "error" icon stays up after a failed transcription.
+/// Slightly longer than the cancel flash so the user can register it even
+/// if they were looking elsewhere.
+const ERROR_FLASH_DURATION: Duration = Duration::from_millis(800);
+
+/// How long a classified error summary lingers in the tray tooltip before
+/// the tooltip reverts to the default "hotkey: …" line. Long enough that
+/// the user can hover to read it, short enough that stale messages don't
+/// persist once they've fixed the problem.
+const ERROR_NOTE_TTL: Duration = Duration::from_secs(20);
+
+/// Heartbeat cadence for the background reachability probe. 30 s keeps the
+/// gray/idle transition responsive without pointlessly hammering the
+/// server when the user isn't dictating.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
 use anyhow::{anyhow, Context, Result};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
@@ -160,10 +176,22 @@ fn main() -> Result<()> {
     // the event-loop reconciler snaps it back to idle blue once the deadline
     // passes.
     let flash_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
-    // Last-applied tray status. The reconciler only repaints when the
-    // computed desired status differs, which also fixes the "stuck red"
-    // case when a cancel flash expires while in_flight is still true.
-    let last_status: Arc<Mutex<tray::TrayStatus>> = Arc::new(Mutex::new(tray::TrayStatus::Idle));
+    // Same shape as flash_until but for transcription-error flashes
+    // (red icon + tooltip briefly after a failed request).
+    let flash_error_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    // Sticky error summary for the tray tooltip. `(expires_at, message)`;
+    // cleared by the reconciler once expires_at has passed, or when a
+    // successful transcription clears the state.
+    let last_error_note: Arc<Mutex<Option<(Instant, String)>>> = Arc::new(Mutex::new(None));
+    // Connection health flag. Flipped false by connect/TLS failures during
+    // a real transcription or by the heartbeat probe; flipped true on
+    // any successful request. Drives the gray Disconnected state.
+    let connection_ok: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
+    // Last-applied tray status + tooltip note. The reconciler only repaints
+    // when the tuple changes, so a red flash can never get stranded if
+    // in_flight delays idle.
+    let last_status: Arc<Mutex<(tray::TrayStatus, Option<String>)>> =
+        Arc::new(Mutex::new((tray::TrayStatus::Idle, None)));
 
     let cfg_loop = cfg.clone();
     let recorder_loop = recorder.clone();
@@ -172,6 +200,9 @@ fn main() -> Result<()> {
     let cancel_flag_loop = cancel_flag.clone();
     let in_flight_loop = in_flight.clone();
     let flash_until_loop = flash_until.clone();
+    let flash_error_until_loop = flash_error_until.clone();
+    let last_error_note_loop = last_error_note.clone();
+    let connection_ok_loop = connection_ok.clone();
     let last_status_loop = last_status.clone();
 
     // Keep tray + binding + mouse-hook state alive for the event loop.
@@ -205,6 +236,53 @@ fn main() -> Result<()> {
         let _ = proxy.send_event(AppEvent::Tick);
     });
 
+    // Background reachability probe. Build a fresh SttClient per cycle so
+    // mid-run config changes (URL, API key, extra_ca_cert) are picked up
+    // without needing to reach into the main loop. The probe itself is a
+    // short-timeout GET /v1/models; classified errors flip connection_ok
+    // and, for long-running outages, populate last_error_note so the
+    // tooltip tells the user *why* the tray went gray.
+    {
+        let cfg_hb = cfg.clone();
+        let connection_ok_hb = connection_ok.clone();
+        let last_error_note_hb = last_error_note.clone();
+        thread::spawn(move || loop {
+            let server_cfg = cfg_hb.lock().unwrap().server.clone();
+            let probe = openai::SttClient::new(&server_cfg)
+                .map_err(|e| e.to_string())
+                .and_then(|c| c.health_check().map_err(|e| e.short_summary()));
+            match probe {
+                Ok(()) => {
+                    let was_offline = !connection_ok_hb.swap(true, Ordering::SeqCst);
+                    if was_offline {
+                        log::info!("Heartbeat: STT server reachable again");
+                        // Only clear a *connection*-flavoured note; if the
+                        // user had a recent auth / endpoint error they
+                        // probably still want to see it.
+                        let mut note = last_error_note_hb.lock().unwrap();
+                        if let Some((_, msg)) = note.as_ref() {
+                            if msg.contains("Cannot reach")
+                                || msg.contains("TLS")
+                                || msg.contains("certificate")
+                            {
+                                *note = None;
+                            }
+                        }
+                    }
+                }
+                Err(summary) => {
+                    let was_online = connection_ok_hb.swap(false, Ordering::SeqCst);
+                    if was_online {
+                        log::warn!("Heartbeat: STT server unreachable ({})", summary);
+                        *last_error_note_hb.lock().unwrap() =
+                            Some((Instant::now() + ERROR_NOTE_TTL, summary));
+                    }
+                }
+            }
+            thread::sleep(HEARTBEAT_INTERVAL);
+        });
+    }
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
@@ -213,45 +291,66 @@ fn main() -> Result<()> {
                 *control_flow = ControlFlow::Exit;
             }
             tao::event::Event::UserEvent(AppEvent::Tick) => {
-                // Reconcile tray icon to the single source of truth:
-                //   flash_until active → CancelFlash (red)
-                //   else if recording  → Recording   (green)
-                //   else               → Idle        (blue)
-                // In-flight requests show idle blue intentionally — the user
-                // already knows the work is queued because they released
-                // the key; a persistent coloured state there would just
-                // confuse a fresh press.
+                // Reconcile tray icon to the single source of truth.
+                // Priority (highest first):
+                //   error flash   → ErrorFlash    (red, transcription failed)
+                //   cancel flash  → CancelFlash   (red, double-tap cancel)
+                //   recording     → Recording     (green)
+                //   in-flight     → Processing    (orange)
+                //   !connection   → Disconnected  (gray)
+                //   otherwise     → Idle          (blue)
                 let now = Instant::now();
-                let flash_active = {
-                    let mut g = flash_until_loop.lock().unwrap();
-                    match *g {
-                        Some(t) if now < t => true,
-                        Some(_) => {
+                let flash_cancel = expire_instant(&flash_until_loop, now);
+                let flash_error = expire_instant(&flash_error_until_loop, now);
+                // Fade out a stale error note so the tooltip reverts to
+                // the default after ERROR_NOTE_TTL elapses.
+                let note_text = {
+                    let mut g = last_error_note_loop.lock().unwrap();
+                    match g.as_ref() {
+                        Some((t, _)) if now >= *t => {
                             *g = None;
-                            false
+                            None
                         }
-                        None => false,
+                        Some((_, msg)) => Some(msg.clone()),
+                        None => None,
                     }
                 };
-                let desired = if flash_active {
+                let recording = recorder_loop.lock().unwrap().is_some();
+                let processing = !recording && in_flight_loop.load(Ordering::SeqCst);
+                let disconnected = !connection_ok_loop.load(Ordering::SeqCst);
+
+                let desired = if flash_error {
+                    tray::TrayStatus::ErrorFlash
+                } else if flash_cancel {
                     tray::TrayStatus::CancelFlash
-                } else if recorder_loop.lock().unwrap().is_some() {
+                } else if recording {
                     tray::TrayStatus::Recording
+                } else if processing {
+                    tray::TrayStatus::Processing
+                } else if disconnected {
+                    tray::TrayStatus::Disconnected
                 } else {
                     tray::TrayStatus::Idle
                 };
+                // Only surface the note when we have something relevant to
+                // say: any red/gray state, or idle with a still-fresh note.
+                let tip_note = match desired {
+                    tray::TrayStatus::Recording | tray::TrayStatus::Processing => None,
+                    _ => note_text,
+                };
                 {
                     let mut last = last_status_loop.lock().unwrap();
-                    if *last != desired {
+                    if last.0 != desired || last.1 != tip_note {
                         let binding = cfg_loop.lock().unwrap().hotkey.binding.clone();
                         if let Err(e) = tray::apply_status(
                             &tray_keep_alive,
                             desired,
                             &binding,
+                            tip_note.as_deref(),
                         ) {
                             log::warn!("tray apply failed: {e:#}");
                         }
-                        *last = desired;
+                        *last = (desired, tip_note);
                     }
                 }
 
@@ -362,12 +461,18 @@ fn main() -> Result<()> {
                                             let cfg_clone = cfg_loop.clone();
                                             let cancel_clone = cancel_flag_loop.clone();
                                             let in_flight_clone = in_flight_loop.clone();
+                                            let conn_clone = connection_ok_loop.clone();
+                                            let flash_err_clone = flash_error_until_loop.clone();
+                                            let note_clone = last_error_note_loop.clone();
                                             in_flight_clone.store(true, Ordering::SeqCst);
                                             thread::spawn(move || {
                                                 let res = send_and_inject(
                                                     wav,
                                                     cfg_clone,
                                                     cancel_clone,
+                                                    conn_clone,
+                                                    flash_err_clone,
+                                                    note_clone,
                                                 );
                                                 in_flight_clone.store(false, Ordering::SeqCst);
                                                 if let Err(e) = res {
@@ -635,14 +740,45 @@ fn send_and_inject(
     wav: Vec<u8>,
     cfg: Arc<Mutex<Config>>,
     cancel_flag: Arc<AtomicBool>,
+    connection_ok: Arc<AtomicBool>,
+    flash_error_until: Arc<Mutex<Option<Instant>>>,
+    last_error_note: Arc<Mutex<Option<(Instant, String)>>>,
 ) -> Result<()> {
     let (server_cfg, stt_cfg, output_cfg) = {
         let c = cfg.lock().unwrap();
         (c.server.clone(), c.stt.clone(), c.output.clone())
     };
 
-    let client = openai::SttClient::new(&server_cfg)?;
-    let text = client.transcribe(wav, &stt_cfg.language_hint)?;
+    let client = match openai::SttClient::new(&server_cfg) {
+        Ok(c) => c,
+        Err(e) => {
+            // Usually a bad extra_ca_cert path — treat as a config-level
+            // error, flash red + surface the message for the user.
+            let summary = format!("STT client init failed: {}", e);
+            log::error!("{}", summary);
+            report_pipeline_error(&summary, false, &flash_error_until, &last_error_note);
+            return Ok(());
+        }
+    };
+    let text = match client.transcribe(wav, &stt_cfg.language_hint) {
+        Ok(t) => {
+            connection_ok.store(true, Ordering::SeqCst);
+            t
+        }
+        Err(e) => {
+            log::error!("Transcription failed: {} — {}", e.short_summary(), e);
+            if e.is_connection_issue() {
+                connection_ok.store(false, Ordering::SeqCst);
+            }
+            report_pipeline_error(
+                &e.short_summary(),
+                e.is_connection_issue(),
+                &flash_error_until,
+                &last_error_note,
+            );
+            return Ok(());
+        }
+    };
     let _ = stt_cfg.max_new_tokens; // server-enforced; see ServerConfig docs
     let _ = &stt_cfg.context_info; // reserved for server-side prompt support
 
@@ -683,7 +819,44 @@ fn send_and_inject(
     if output_cfg.send_enter {
         injector::send_enter()?;
     }
+    // Successful end-to-end — clear any stale error note so the tooltip
+    // doesn't keep showing last run's problem after it was fixed.
+    *last_error_note.lock().unwrap() = None;
     Ok(())
+}
+
+/// Fire the red ErrorFlash and stash a short summary for the tooltip.
+/// Connection issues get a slightly longer TTL because the user may need
+/// time to bring the backend back online.
+fn report_pipeline_error(
+    summary: &str,
+    is_connection_issue: bool,
+    flash_error_until: &Arc<Mutex<Option<Instant>>>,
+    last_error_note: &Arc<Mutex<Option<(Instant, String)>>>,
+) {
+    let now = Instant::now();
+    *flash_error_until.lock().unwrap() = Some(now + ERROR_FLASH_DURATION);
+    let ttl = if is_connection_issue {
+        ERROR_NOTE_TTL * 2
+    } else {
+        ERROR_NOTE_TTL
+    };
+    *last_error_note.lock().unwrap() = Some((now + ttl, summary.to_string()));
+}
+
+/// Shared helper for "drain a deadline-based flash": returns true if the
+/// deadline is still in the future, false otherwise (and clears the slot
+/// once the deadline passes so the reconciler can see a clean edge).
+fn expire_instant(cell: &Arc<Mutex<Option<Instant>>>, now: Instant) -> bool {
+    let mut g = cell.lock().unwrap();
+    match *g {
+        Some(t) if now < t => true,
+        Some(_) => {
+            *g = None;
+            false
+        }
+        None => false,
+    }
 }
 
 /// VibeVoice ASR returns bracketed meta tags ("[Music]", "[Noise]",

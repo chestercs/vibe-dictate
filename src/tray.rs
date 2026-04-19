@@ -104,22 +104,72 @@ pub struct TrayState {
 }
 
 /// Authoritative tray icon state. The event loop computes one of these
-/// every tick from (recorder, flash_until, ...) and the reconciler only
-/// re-paints the TrayIcon when the value actually changes — that way
-/// a red cancel-flash can never get stranded if in_flight delays idle.
+/// every tick from (recorder, flash_until, in_flight, connection_ok, ...)
+/// and the reconciler only re-paints the TrayIcon when the value actually
+/// changes — that way a red flash can never get stranded if in_flight
+/// delays idle.
+///
+/// Priority order (highest first), enforced in the main-loop reconciler:
+/// ErrorFlash → CancelFlash → Recording → Processing → Disconnected → Idle.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TrayStatus {
+    /// Default, no active work, backend reachable (blue).
     Idle,
+    /// Actively capturing audio (green).
     Recording,
+    /// Audio sent, waiting on server response (orange).
+    Processing,
+    /// Heartbeat / last request failed with a connection issue (gray).
+    Disconnected,
+    /// Brief red overlay after a double-tap cancel.
     CancelFlash,
+    /// Brief red overlay after a transcription error.
+    ErrorFlash,
 }
 
-pub fn apply_status(state: &TrayState, status: TrayStatus, binding: &str) -> Result<()> {
-    match status {
-        TrayStatus::Idle => set_recording(state, false, binding),
-        TrayStatus::Recording => set_recording(state, true, ""),
-        TrayStatus::CancelFlash => set_cancel_flash(state),
-    }
+/// Apply a desired tray status. `binding` is the current hotkey string
+/// (for the default tooltip). `note` is an optional extra line appended to
+/// the tooltip — used to surface error summaries ("Bad API key", …) or
+/// the "Transcribing…" progress hint.
+pub fn apply_status(
+    state: &TrayState,
+    status: TrayStatus,
+    binding: &str,
+    note: Option<&str>,
+) -> Result<()> {
+    let (icon, default_tip) = match status {
+        TrayStatus::Idle => (
+            indicator_icon(30, 120, 220)?,
+            format!("vibe-dictate — hotkey: {}", binding),
+        ),
+        TrayStatus::Recording => (
+            indicator_icon(60, 180, 80)?,
+            "vibe-dictate — recording… release to send".to_string(),
+        ),
+        TrayStatus::Processing => (
+            indicator_icon(230, 160, 30)?,
+            "vibe-dictate — transcribing…".to_string(),
+        ),
+        TrayStatus::Disconnected => (
+            indicator_icon(140, 140, 140)?,
+            format!("vibe-dictate — offline (hotkey: {})", binding),
+        ),
+        TrayStatus::CancelFlash => (
+            indicator_icon(220, 50, 50)?,
+            "vibe-dictate — cancelled".to_string(),
+        ),
+        TrayStatus::ErrorFlash => (
+            indicator_icon(220, 50, 50)?,
+            "vibe-dictate — transcription error".to_string(),
+        ),
+    };
+    state.icon.set_icon(Some(icon)).context("tray set_icon")?;
+    let tip = match note {
+        Some(n) if !n.is_empty() => format!("{}\n{}", default_tip, n),
+        _ => default_tip,
+    };
+    let _ = state.icon.set_tooltip(Some(tip));
+    Ok(())
 }
 
 pub fn build(cfg: &Config) -> Result<TrayState> {
@@ -461,35 +511,6 @@ pub fn rebuild_menu(state: &TrayState, cfg: &Config) -> Result<()> {
 
 pub fn is_quit(e: &MenuEvent) -> bool {
     e.id().0 == ID_QUIT
-}
-
-pub fn set_recording(state: &TrayState, recording: bool, binding: &str) -> Result<()> {
-    let icon = if recording {
-        indicator_icon(60, 180, 80)?
-    } else {
-        indicator_icon(30, 120, 220)?
-    };
-    state.icon.set_icon(Some(icon)).context("tray set_icon")?;
-    let tip = if recording {
-        "vibe-dictate — recording… release to send".to_string()
-    } else {
-        format!("vibe-dictate — hotkey: {}", binding)
-    };
-    let _ = state.icon.set_tooltip(Some(tip));
-    Ok(())
-}
-
-/// Flash a red tray icon to acknowledge a double-tap cancel. The caller is
-/// expected to restore the idle icon after a short delay via the usual
-/// `set_recording(&tray, false, ..)` path — we don't spawn a timer here
-/// because TrayIcon isn't Send and the main event loop already ticks often.
-pub fn set_cancel_flash(state: &TrayState) -> Result<()> {
-    let icon = indicator_icon(220, 50, 50)?;
-    state.icon.set_icon(Some(icon)).context("tray set_icon cancel")?;
-    let _ = state
-        .icon
-        .set_tooltip(Some("vibe-dictate — cancelled".to_string()));
-    Ok(())
 }
 
 /// Result of handling a menu event so main can react (rebind hotkey, rebuild menu).
