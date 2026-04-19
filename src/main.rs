@@ -438,11 +438,11 @@ fn main() -> Result<()> {
                                     wav.len(), duration_ms,
                                 );
                                 let cfg_clone = cfg_loop.clone();
-                                // VAD has no cancel gesture — pass a fresh
-                                // always-false flag so a stale PTT double-tap
-                                // from before a mode-switch can't swallow the
-                                // VAD output.
-                                let cancel_clone = Arc::new(AtomicBool::new(false));
+                                // Share the global cancel flag so the VAD
+                                // hotkey cancel (see PushAction::Press in VAD
+                                // mode) can drop the in-flight utterance
+                                // before it gets pasted.
+                                let cancel_clone = cancel_flag_loop.clone();
                                 let in_flight_clone = in_flight_loop.clone();
                                 let conn_clone = connection_ok_loop.clone();
                                 let flash_err_clone = flash_error_until_loop.clone();
@@ -493,6 +493,32 @@ fn main() -> Result<()> {
                                 recorder_loop.lock().unwrap().is_some();
                             let currently_in_flight =
                                 in_flight_loop.load(Ordering::SeqCst);
+
+                            // VAD mode has no PTT semantics — the hotkey only
+                            // means "cancel whatever is currently running /
+                            // being processed". No recording to start, no
+                            // double-tap gesture.
+                            let in_vad_mode = {
+                                let c = cfg_loop.lock().unwrap();
+                                c.input.mode == InputMode::VoiceActivation
+                            };
+                            if in_vad_mode {
+                                if currently_in_flight || vad_speech_active_loop.load(Ordering::SeqCst) {
+                                    cancel_flag_loop.store(true, Ordering::SeqCst);
+                                    vad_speech_active_loop
+                                        .store(false, Ordering::SeqCst);
+                                    log::info!(
+                                        "VAD cancel: hotkey pressed — dropping active/in-flight utterance"
+                                    );
+                                    *flash_until_loop.lock().unwrap() =
+                                        Some(Instant::now() + CANCEL_FLASH_DURATION);
+                                } else {
+                                    log::info!(
+                                        "VAD cancel hotkey pressed but nothing in flight"
+                                    );
+                                }
+                                continue;
+                            }
                             // Quick-press-after-release cancel: user just
                             // released, saw the processing state, and
                             // slammed the key again to take it back. Only
@@ -836,7 +862,17 @@ fn apply_input_mode(
             }
         }
         InputMode::VoiceActivation => {
-            binding_manager.disable();
+            // Keep the hotkey binding alive in VAD mode too, but interpret
+            // Press events as "cancel the in-flight transcription" instead
+            // of "start a recording". Gives the user a fast escape hatch
+            // when the VAD picked up something they didn't want.
+            let binding = cfg.hotkey.binding.clone();
+            if let Err(e) = binding_manager.apply(&binding) {
+                log::warn!(
+                    "VAD mode: could not bind cancel hotkey '{}': {:#}",
+                    binding, e
+                );
+            }
             if vad_session.is_none() {
                 log::info!("Input mode → VAD: starting capture + VAD worker");
                 *vad_session =
@@ -991,8 +1027,10 @@ fn send_and_inject(
     // Drop the result instead of pasting it. We don't try to abort the HTTP
     // call itself — reqwest blocking has no cheap cancellation — but
     // swallowing the output is what the user actually cares about.
-    if cancel_flag.load(Ordering::SeqCst) {
-        log::info!("Double-tap cancel honored, transcription discarded");
+    // Consume the flag as part of the check so a single cancel press only
+    // drops the one in-flight utterance, not every subsequent VAD pickup.
+    if cancel_flag.swap(false, Ordering::SeqCst) {
+        log::info!("Cancel honored, transcription discarded");
         return Ok(());
     }
 
