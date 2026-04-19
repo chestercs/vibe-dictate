@@ -18,6 +18,8 @@ const ID_AUTOSTART: &str = "vd:autostart";
 const ID_OUT_CLIPBOARD: &str = "vd:out:clipboard";
 const ID_OUT_SENDINPUT: &str = "vd:out:sendinput";
 const ID_OUT_SEND_ENTER: &str = "vd:out:send_enter";
+const PREFIX_SEND_DELAY: &str = "vd:out:keydelay:";
+const PREFIX_SEND_HOLD: &str = "vd:out:keyhold:";
 const ID_OPEN_LOG: &str = "vd:open:log";
 const ID_OPEN_CONFIG: &str = "vd:open:config";
 const ID_HOTKEY_CAPTURE: &str = "vd:hotkey:__capture__";
@@ -57,6 +59,30 @@ pub const MAXTOK_OPTIONS: &[(&str, u32)] = &[
     ("8192 (~5 min)", 8192),
     ("16384 (~10 min)", 16384),
     ("32768 (~20 min)", 32768),
+];
+
+/// SendInput inter-character pacing presets (ms). 5 ms is the default but
+/// Notepad and Electron apps on slower hardware still drop characters —
+/// bump to 15-30 ms for those. 0 ms = burst mode (fastest, least reliable).
+pub const SEND_DELAY_OPTIONS: &[(&str, u64)] = &[
+    ("0 ms (burst, fastest)", 0),
+    ("5 ms (default)", 5),
+    ("10 ms", 10),
+    ("15 ms", 15),
+    ("20 ms", 20),
+    ("30 ms", 30),
+    ("50 ms (very slow, safest)", 50),
+];
+
+/// SendInput key-down hold presets (ms). Usually 0 works. A few legacy /
+/// hardened apps filter zero-duration keypresses; raise if characters
+/// still drop after bumping the inter-char delay.
+pub const SEND_HOLD_OPTIONS: &[(&str, u64)] = &[
+    ("0 ms (default)", 0),
+    ("2 ms", 2),
+    ("5 ms", 5),
+    ("10 ms", 10),
+    ("20 ms", 20),
 ];
 
 /// Which scalar config field the user is editing via the Win32 text-input
@@ -316,6 +342,68 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
     output_sub.append(&mode_sendinput)?;
     menu.append(&output_sub)?;
 
+    // SendInput pacing presets — only meaningful when mode=SendInput, but
+    // we show them unconditionally so switching modes doesn't reshuffle
+    // the menu layout. Label includes the current value so the user
+    // doesn't have to open the submenu to check.
+    let delay_sub = Submenu::new(
+        format!("SendInput char delay: {} ms", cfg.output.send_key_delay_ms),
+        true,
+    );
+    for (label, val) in SEND_DELAY_OPTIONS {
+        let id = MenuId::new(format!("{PREFIX_SEND_DELAY}{val}"));
+        let item = CheckMenuItem::with_id(
+            id,
+            *label,
+            true,
+            cfg.output.send_key_delay_ms == *val,
+            None,
+        );
+        delay_sub.append(&item)?;
+    }
+    let delay_in_presets = SEND_DELAY_OPTIONS
+        .iter()
+        .any(|(_, v)| *v == cfg.output.send_key_delay_ms);
+    if !delay_in_presets {
+        delay_sub.append(&PredefinedMenuItem::separator())?;
+        delay_sub.append(&CheckMenuItem::new(
+            format!("Current: {} ms", cfg.output.send_key_delay_ms),
+            false,
+            true,
+            None,
+        ))?;
+    }
+    menu.append(&delay_sub)?;
+
+    let hold_sub = Submenu::new(
+        format!("SendInput key hold: {} ms", cfg.output.send_key_down_delay_ms),
+        true,
+    );
+    for (label, val) in SEND_HOLD_OPTIONS {
+        let id = MenuId::new(format!("{PREFIX_SEND_HOLD}{val}"));
+        let item = CheckMenuItem::with_id(
+            id,
+            *label,
+            true,
+            cfg.output.send_key_down_delay_ms == *val,
+            None,
+        );
+        hold_sub.append(&item)?;
+    }
+    let hold_in_presets = SEND_HOLD_OPTIONS
+        .iter()
+        .any(|(_, v)| *v == cfg.output.send_key_down_delay_ms);
+    if !hold_in_presets {
+        hold_sub.append(&PredefinedMenuItem::separator())?;
+        hold_sub.append(&CheckMenuItem::new(
+            format!("Current: {} ms", cfg.output.send_key_down_delay_ms),
+            false,
+            true,
+            None,
+        ))?;
+    }
+    menu.append(&hold_sub)?;
+
     let send_enter = CheckMenuItem::with_id(
         MenuId::new(ID_OUT_SEND_ENTER),
         "Append Enter after dictation",
@@ -449,6 +537,24 @@ pub fn handle_menu_event(
         let new_val = c.output.send_enter;
         c.save()?;
         log::info!("Append Enter after dictation: {}", new_val);
+        outcome.menu_dirty = true;
+    } else if let Some(rest) = id.strip_prefix(PREFIX_SEND_DELAY) {
+        let val: u64 = rest.parse().unwrap_or(5);
+        let mut c = cfg.lock().unwrap();
+        if c.output.send_key_delay_ms != val {
+            c.output.send_key_delay_ms = val;
+            c.save()?;
+            log::info!("SendInput char delay set to {} ms", val);
+        }
+        outcome.menu_dirty = true;
+    } else if let Some(rest) = id.strip_prefix(PREFIX_SEND_HOLD) {
+        let val: u64 = rest.parse().unwrap_or(0);
+        let mut c = cfg.lock().unwrap();
+        if c.output.send_key_down_delay_ms != val {
+            c.output.send_key_down_delay_ms = val;
+            c.save()?;
+            log::info!("SendInput key hold set to {} ms", val);
+        }
         outcome.menu_dirty = true;
     } else if id == ID_OPEN_LOG {
         let p = Config::log_path()?;
