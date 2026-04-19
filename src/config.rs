@@ -31,8 +31,10 @@ pub struct ServerConfig {
     /// slash. The client appends `/v1/audio/transcriptions`.
     #[serde(alias = "url")]
     pub base_url: String,
-    /// Bearer token for the server. Leave empty for localhost or when the
-    /// server has auth disabled.
+    /// Bearer token for the server. Default matches the shared
+    /// `DEFAULT_API_KEY` baked into the shipped compose files so a fresh
+    /// install is authenticated out of the box — change it on both ends
+    /// before exposing the backend publicly.
     #[serde(alias = "api_token")]
     pub api_key: String,
     /// Model identifier sent in the multipart `model` field. Servers that
@@ -53,11 +55,18 @@ fn default_stt_model() -> String {
     "microsoft/VibeVoice-ASR-HF".to_string()
 }
 
+/// Shared default Bearer token. Baked into both ends (client default config
+/// and the compose `.env.*.example`) so a fresh install is authenticated
+/// out of the box. The value is intentionally a well-known "change me"
+/// string — rotate it on both the server .env and in tray → STT server →
+/// API key before exposing the backend on a public network.
+pub const DEFAULT_API_KEY: &str = "vibe-dictate-default-change-me";
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             base_url: "http://localhost:8080".to_string(),
-            api_key: String::new(),
+            api_key: DEFAULT_API_KEY.to_string(),
             model: default_stt_model(),
             extra_ca_cert: String::new(),
         }

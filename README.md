@@ -289,10 +289,10 @@ file by hand. After a manual edit: tray → "Reload config".
 
 ```toml
 [server]
-base_url       = "http://localhost:8080"       # OpenAI-compat endpoint base URL (no trailing slash)
-api_key        = ""                             # Bearer token; leave empty for local / no-auth
-model          = "microsoft/VibeVoice-ASR-HF"   # sent in multipart `model` field (ignored by single-model servers; use "whisper-1" for OpenAI)
-extra_ca_cert  = ""                             # absolute path to a PEM cert/bundle for self-signed CAs
+base_url       = "http://localhost:8080"              # OpenAI-compat endpoint base URL (no trailing slash)
+api_key        = "vibe-dictate-default-change-me"     # Bearer token; matches the default in the shipped .env.*.example so a fresh install is locked out of the box. Rotate on both ends before exposing publicly. Leave empty for no-auth.
+model          = "microsoft/VibeVoice-ASR-HF"         # sent in multipart `model` field (ignored by single-model servers; use "whisper-1" for OpenAI)
+extra_ca_cert  = ""                                   # absolute path to a PEM cert/bundle for self-signed CAs
 
 [stt]
 context_info    = "..."         # free-form prompt; reserved (not yet threaded to OpenAI-compat servers)
