@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default)]
-    pub gradio: GradioConfig,
+    /// `[server]` in TOML. Older configs used `[gradio]` with fields
+    /// `url` / `api_token`; the serde aliases on ServerConfig let those
+    /// load transparently and get rewritten on the next save.
+    #[serde(default, alias = "gradio")]
+    pub server: ServerConfig,
     #[serde(default)]
     pub stt: SttConfig,
     #[serde(default)]
@@ -22,25 +25,40 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GradioConfig {
-    pub url: String,
-    pub function: String,
-    pub api_token: String,
+pub struct ServerConfig {
+    /// Base URL of the OpenAI-compatible STT server, e.g.
+    /// `http://localhost:8080` or `https://stt.example.com`. No trailing
+    /// slash. The client appends `/v1/audio/transcriptions`.
+    #[serde(alias = "url")]
+    pub base_url: String,
+    /// Bearer token for the server. Leave empty for localhost or when the
+    /// server has auth disabled.
+    #[serde(alias = "api_token")]
+    pub api_key: String,
+    /// Model identifier sent in the multipart `model` field. Servers that
+    /// host a single model (our VibeVoice shim, most self-hosted vLLM
+    /// deployments) ignore this. For OpenAI Whisper, set to `whisper-1`.
+    #[serde(default = "default_stt_model")]
+    pub model: String,
     /// Absolute path to a PEM-encoded CA certificate (or bundle) that
     /// reqwest should trust in addition to the system roots. Leave empty
     /// for localhost / public-CA deployments; set this when pointing the
-    /// client at a remote VibeVoice endpoint behind a self-signed cert
-    /// or a private CA (e.g. Tailscale funnel, internal proxy).
+    /// client at a remote endpoint behind a self-signed cert or a
+    /// private CA (e.g. Tailscale funnel, internal proxy).
     #[serde(default)]
     pub extra_ca_cert: String,
 }
 
-impl Default for GradioConfig {
+fn default_stt_model() -> String {
+    "microsoft/VibeVoice-ASR-HF".to_string()
+}
+
+impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            url: "http://localhost:7860".to_string(),
-            function: "transcribe_audio".to_string(),
-            api_token: String::new(),
+            base_url: "http://localhost:8080".to_string(),
+            api_key: String::new(),
+            model: default_stt_model(),
             extra_ca_cert: String::new(),
         }
     }
@@ -188,7 +206,7 @@ impl Default for StartupConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            gradio: GradioConfig::default(),
+            server: ServerConfig::default(),
             stt: SttConfig::default(),
             audio: AudioConfig::default(),
             hotkey: HotkeyConfig::default(),
@@ -272,6 +290,16 @@ impl Config {
         if self.stt.context_info.trim().is_empty() {
             log::info!("Seeding default context_info prompt");
             self.stt.context_info = default_context_info();
+            changed = true;
+        }
+
+        // v0.1 → v0.2 transport migration: Gradio (7860) → OpenAI-compat
+        // (8080). Only auto-migrate the exact legacy default URL; if the
+        // user pointed at a remote/custom URL we leave it — they'll know
+        // whether it's OpenAI-compat or not.
+        if self.server.base_url.trim_end_matches('/') == "http://localhost:7860" {
+            log::info!("Migrating server.base_url 7860 → 8080 (OpenAI-compat default)");
+            self.server.base_url = "http://localhost:8080".to_string();
             changed = true;
         }
         changed

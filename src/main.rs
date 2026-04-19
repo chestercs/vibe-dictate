@@ -30,7 +30,7 @@ use tray_icon::menu::MenuEvent;
 mod audio;
 mod autostart;
 mod config;
-mod gradio;
+mod openai;
 mod hotkey_capture;
 mod injector;
 mod mouse_hook;
@@ -189,8 +189,9 @@ fn main() -> Result<()> {
     let mut pending_capture: Option<PendingCapture> = None;
 
     // Same shape as PendingCapture but for scalar config fields (language,
-    // context info, gradio URL/token/CA path). We remember which field the
-    // popup is for so the callback at result-time knows where to store.
+    // context info, STT server URL/key/model/CA path). We remember which
+    // field the popup is for so the callback at result-time knows where
+    // to store.
     struct PendingTextInput {
         handle: text_input::TextInputHandle,
         field: tray::TextField,
@@ -556,23 +557,29 @@ fn text_input_params(
             "Prompt describing speaker + expected vocabulary (fed to ASR):".to_string(),
             c.stt.context_info.clone(),
         ),
-        tray::TextField::GradioUrl => (
-            "vibe-dictate — Gradio URL".to_string(),
-            "Base URL of the VibeVoice ASR Gradio server (http/https, no trailing slash):"
+        tray::TextField::ServerUrl => (
+            "vibe-dictate — STT server URL".to_string(),
+            "Base URL of the OpenAI-compatible STT server (http/https, no trailing slash):"
                 .to_string(),
-            c.gradio.url.clone(),
+            c.server.base_url.clone(),
         ),
-        tray::TextField::GradioToken => (
-            "vibe-dictate — Gradio API token".to_string(),
-            "Bearer token for remote Gradio (leave empty for local http://localhost):"
+        tray::TextField::ServerKey => (
+            "vibe-dictate — API key".to_string(),
+            "Bearer token for the STT server (leave empty for local http://localhost):"
                 .to_string(),
-            c.gradio.api_token.clone(),
+            c.server.api_key.clone(),
         ),
-        tray::TextField::GradioCaCert => (
+        tray::TextField::ServerModel => (
+            "vibe-dictate — STT model".to_string(),
+            "Model identifier sent in the request (e.g. microsoft/VibeVoice-ASR-HF, whisper-1):"
+                .to_string(),
+            c.server.model.clone(),
+        ),
+        tray::TextField::ServerCaCert => (
             "vibe-dictate — extra CA cert path".to_string(),
             "Absolute path to an extra PEM CA cert (leave empty for public/system CAs):"
                 .to_string(),
-            c.gradio.extra_ca_cert.clone(),
+            c.server.extra_ca_cert.clone(),
         ),
     }
 }
@@ -598,17 +605,25 @@ fn apply_text_input(field: tray::TextField, value: &str, cfg: &Arc<Mutex<Config>
             c.stt.context_info = value.to_string();
             log::info!("Context info updated ({} chars)", value.len());
         }
-        tray::TextField::GradioUrl => {
-            c.gradio.url = trimmed.clone();
-            log::info!("Gradio URL set to '{}'", trimmed);
+        tray::TextField::ServerUrl => {
+            c.server.base_url = trimmed.clone();
+            log::info!("STT server URL set to '{}'", trimmed);
         }
-        tray::TextField::GradioToken => {
-            c.gradio.api_token = trimmed;
-            log::info!("Gradio API token updated (length {})", c.gradio.api_token.len());
+        tray::TextField::ServerKey => {
+            c.server.api_key = trimmed;
+            log::info!("STT API key updated (length {})", c.server.api_key.len());
         }
-        tray::TextField::GradioCaCert => {
-            c.gradio.extra_ca_cert = trimmed.clone();
-            log::info!("Gradio extra CA cert path set to '{}'", trimmed);
+        tray::TextField::ServerModel => {
+            if trimmed.is_empty() {
+                log::info!("Empty STT model, keeping previous value");
+                return;
+            }
+            c.server.model = trimmed.clone();
+            log::info!("STT model set to '{}'", trimmed);
+        }
+        tray::TextField::ServerCaCert => {
+            c.server.extra_ca_cert = trimmed.clone();
+            log::info!("STT extra CA cert path set to '{}'", trimmed);
         }
     }
     if let Err(e) = c.save() {
@@ -621,23 +636,20 @@ fn send_and_inject(
     cfg: Arc<Mutex<Config>>,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<()> {
-    let (gradio_cfg, stt_cfg, output_cfg) = {
+    let (server_cfg, stt_cfg, output_cfg) = {
         let c = cfg.lock().unwrap();
-        (c.gradio.clone(), c.stt.clone(), c.output.clone())
+        (c.server.clone(), c.stt.clone(), c.output.clone())
     };
 
-    let client = gradio::GradioClient::new(&gradio_cfg)?;
-    let text = client.transcribe(
-        wav,
-        &stt_cfg.context_info,
-        stt_cfg.max_new_tokens,
-        &stt_cfg.language_hint,
-    )?;
+    let client = openai::SttClient::new(&server_cfg)?;
+    let text = client.transcribe(wav, &stt_cfg.language_hint)?;
+    let _ = stt_cfg.max_new_tokens; // server-enforced; see ServerConfig docs
+    let _ = &stt_cfg.context_info; // reserved for server-side prompt support
 
-    // Final cancel check: user double-tapped while Gradio was crunching. Drop
-    // the result instead of pasting it. We don't try to abort the HTTP call
-    // itself — reqwest blocking has no cheap cancellation — but swallowing
-    // the output is what the user actually cares about.
+    // Final cancel check: user double-tapped while the server was crunching.
+    // Drop the result instead of pasting it. We don't try to abort the HTTP
+    // call itself — reqwest blocking has no cheap cancellation — but
+    // swallowing the output is what the user actually cares about.
     if cancel_flag.load(Ordering::SeqCst) {
         log::info!("Double-tap cancel honored, transcription discarded");
         return Ok(());

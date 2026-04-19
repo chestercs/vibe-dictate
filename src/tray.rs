@@ -30,9 +30,10 @@ const PREFIX_LANG: &str = "vd:lang:";
 const ID_LANG_CUSTOM: &str = "vd:lang:__custom__";
 const PREFIX_MAXTOK: &str = "vd:maxtok:";
 const ID_CTX_EDIT: &str = "vd:stt:ctx";
-const ID_GR_URL: &str = "vd:gr:url";
-const ID_GR_TOKEN: &str = "vd:gr:token";
-const ID_GR_CA: &str = "vd:gr:ca";
+const ID_SRV_URL: &str = "vd:srv:url";
+const ID_SRV_KEY: &str = "vd:srv:key";
+const ID_SRV_MODEL: &str = "vd:srv:model";
+const ID_SRV_CA: &str = "vd:srv:ca";
 
 /// Language presets shown as rubber-stamp options in the tray. Anything else
 /// goes via the Custom… text-input dialog. Order mirrors VibeVoice-ASR's
@@ -92,9 +93,10 @@ pub const SEND_HOLD_OPTIONS: &[(&str, u64)] = &[
 pub enum TextField {
     LanguageHint,
     ContextInfo,
-    GradioUrl,
-    GradioToken,
-    GradioCaCert,
+    ServerUrl,
+    ServerKey,
+    ServerModel,
+    ServerCaCert,
 }
 
 pub struct TrayState {
@@ -207,34 +209,40 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
 
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // Gradio server submenu — opens the text-input popup per field. We don't
-    // show the current token value (sensitive) in the submenu label, but
-    // URL and CA path are safe to include as a tooltip-ish suffix.
-    let gradio_sub = Submenu::new("Gradio server", true);
-    let url_label = if cfg.gradio.url.is_empty() {
+    // STT server submenu — opens the text-input popup per field. We don't
+    // show the current key value (sensitive) in the submenu label, but
+    // URL, model, and CA path are safe to include as a tooltip-ish suffix.
+    let server_sub = Submenu::new("STT server", true);
+    let url_label = if cfg.server.base_url.is_empty() {
         "Edit URL…".to_string()
     } else {
-        format!("Edit URL…  ({})", truncate_middle(&cfg.gradio.url, 48))
+        format!("Edit URL…  ({})", truncate_middle(&cfg.server.base_url, 48))
     };
-    gradio_sub.append(&MenuItem::with_id(MenuId::new(ID_GR_URL), url_label, true, None))?;
-    let token_label = if cfg.gradio.api_token.is_empty() {
-        "Edit API token…  (empty)"
+    server_sub.append(&MenuItem::with_id(MenuId::new(ID_SRV_URL), url_label, true, None))?;
+    let key_label = if cfg.server.api_key.is_empty() {
+        "Edit API key…  (empty)"
     } else {
-        "Edit API token…  (set)"
+        "Edit API key…  (set)"
     };
-    gradio_sub.append(&MenuItem::with_id(
-        MenuId::new(ID_GR_TOKEN),
-        token_label,
+    server_sub.append(&MenuItem::with_id(
+        MenuId::new(ID_SRV_KEY),
+        key_label,
         true,
         None,
     ))?;
-    let ca_label = if cfg.gradio.extra_ca_cert.is_empty() {
+    let model_label = if cfg.server.model.is_empty() {
+        "Edit model…".to_string()
+    } else {
+        format!("Edit model…  ({})", truncate_middle(&cfg.server.model, 48))
+    };
+    server_sub.append(&MenuItem::with_id(MenuId::new(ID_SRV_MODEL), model_label, true, None))?;
+    let ca_label = if cfg.server.extra_ca_cert.is_empty() {
         "Edit CA cert path…  (empty)".to_string()
     } else {
-        format!("Edit CA cert path…  ({})", truncate_middle(&cfg.gradio.extra_ca_cert, 48))
+        format!("Edit CA cert path…  ({})", truncate_middle(&cfg.server.extra_ca_cert, 48))
     };
-    gradio_sub.append(&MenuItem::with_id(MenuId::new(ID_GR_CA), ca_label, true, None))?;
-    menu.append(&gradio_sub)?;
+    server_sub.append(&MenuItem::with_id(MenuId::new(ID_SRV_CA), ca_label, true, None))?;
+    menu.append(&server_sub)?;
 
     // Language submenu — preset checkmarks + Custom… for anything exotic.
     let lang_sub = Submenu::new("Language", true);
@@ -619,12 +627,14 @@ pub fn handle_menu_event(
         outcome.menu_dirty = true;
     } else if id == ID_CTX_EDIT {
         outcome.text_input_request = Some(TextField::ContextInfo);
-    } else if id == ID_GR_URL {
-        outcome.text_input_request = Some(TextField::GradioUrl);
-    } else if id == ID_GR_TOKEN {
-        outcome.text_input_request = Some(TextField::GradioToken);
-    } else if id == ID_GR_CA {
-        outcome.text_input_request = Some(TextField::GradioCaCert);
+    } else if id == ID_SRV_URL {
+        outcome.text_input_request = Some(TextField::ServerUrl);
+    } else if id == ID_SRV_KEY {
+        outcome.text_input_request = Some(TextField::ServerKey);
+    } else if id == ID_SRV_MODEL {
+        outcome.text_input_request = Some(TextField::ServerModel);
+    } else if id == ID_SRV_CA {
+        outcome.text_input_request = Some(TextField::ServerCaCert);
     }
     Ok(outcome)
 }
