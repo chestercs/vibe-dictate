@@ -10,11 +10,11 @@
 #    5. Optional: docker compose up -d (--up)
 #
 #  Usage:
-#    scripts/setup_vibevoice.sh                   # GB10 stack, clone + pull
-#    scripts/setup_vibevoice.sh --arch x86        # consumer NVIDIA stack
-#    scripts/setup_vibevoice.sh --build           # prebuilt image (GB10 only)
-#    scripts/setup_vibevoice.sh --up              # also bring the stack up
-#    scripts/setup_vibevoice.sh --arch x86 --up
+#    ./setup_vibevoice.sh                   # GB10 stack, clone + pull
+#    ./setup_vibevoice.sh --arch x86        # consumer NVIDIA stack
+#    ./setup_vibevoice.sh --build           # prebuilt image (GB10 only)
+#    ./setup_vibevoice.sh --up              # also bring the stack up
+#    ./setup_vibevoice.sh --arch x86 --up
 # =============================================================================
 set -euo pipefail
 
@@ -50,8 +50,8 @@ case "$ARCH" in
     *) echo "--arch must be gb10 or x86" >&2; exit 2 ;;
 esac
 
-# Move to repo root (one up from scripts/).
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# Always operate from the repo root (where this script lives).
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
 command -v docker >/dev/null 2>&1 || {
     echo "docker not found on PATH" >&2; exit 1;

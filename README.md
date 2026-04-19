@@ -114,7 +114,8 @@ vibe-dictate/                        <- this repo
   docker-compose-vibedictate-build.yml   <- Rust cross-compile pipeline
   Dockerfile.build                   <- builder image for the .exe
   Dockerfile.vibevoice-gb10          <- B-opció (prebuilt) GB10 image
-  scripts/setup_vibevoice.sh         <- one-shot clone + .env + pull helper
+  setup_vibevoice.sh                 <- one-shot clone + .env + pull (Linux/macOS)
+  setup_vibevoice.bat                <- one-shot clone + .env + pull (Windows)
   scripts/vibevoice_entrypoint.sh    <- runtime pip-install on first boot
   .env.vibevoice.example             <- copy to .env for x86_64
   .env.vibevoice-gb10.example        <- copy to .env for GB10
@@ -125,15 +126,22 @@ vibe-dictate/                        <- this repo
 
 ### One-shot setup
 
-The backend host has a helper script that clones the upstream tree,
-seeds `.env`, pre-pulls the base image, and optionally brings the
-stack up:
+The backend host has a helper that clones the upstream tree, seeds
+`.env`, pre-pulls the base image, and optionally brings the stack up.
+Linux/macOS hosts use the bash version, Windows hosts the batch twin:
 
 ```bash
-scripts/setup_vibevoice.sh                   # GB10 (default), clone + pull
-scripts/setup_vibevoice.sh --arch x86        # consumer NVIDIA stack
-scripts/setup_vibevoice.sh --arch x86 --up   # also `compose up -d`
-scripts/setup_vibevoice.sh --build           # B-opció prebuilt image (GB10 only)
+# Linux/macOS (default --arch gb10)
+./setup_vibevoice.sh                    # clone + pull
+./setup_vibevoice.sh --arch x86 --up    # consumer NVIDIA + compose up -d
+./setup_vibevoice.sh --build            # B-opció prebuilt image (GB10 only)
+```
+
+```bat
+:: Windows (default --arch x86)
+setup_vibevoice.bat
+setup_vibevoice.bat --up
+setup_vibevoice.bat --arch gb10
 ```
 
 The sections below walk through the same steps manually.
