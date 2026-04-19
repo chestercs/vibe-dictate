@@ -19,6 +19,7 @@
 #  Services:
 #    docker compose up -d                      # Gradio ASR on :7860 (default)
 #    docker compose --profile realtime up -d   # also realtime TTS on :3001
+#    docker compose --profile openai up -d     # also OpenAI-compat ASR on :8080
 # ============================================================================
 
 services:
@@ -116,6 +117,60 @@ services:
       timeout: 10s
       retries: 5
       start_period: 400s
+
+  # ---------------------------------------------------------------------
+  # OpenAI-compat ASR (profile=openai). microsoft/VibeVoice-ASR-HF via a
+  # tiny FastAPI server. Exposes /v1/audio/transcriptions + /v1/models so
+  # any OpenAI STT client (Open WebUI, LibreChat, vibe-dictate, ...) can
+  # point at it. transformers>=5.3.0 is installed on first boot by
+  # scripts/openai_asr_entrypoint.sh (separate marker from the Gradio
+  # stack — that one runs transformers 4.x).
+  # ---------------------------------------------------------------------
+  vibevoice-asr-openai:
+    image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}
+    container_name: vibevoice-asr-openai
+    profiles: ["openai"]
+    restart: unless-stopped
+    tty: true
+    ipc: host
+    entrypoint: ["/bin/bash", "/workspace/vibe-dictate-scripts/openai_asr_entrypoint.sh"]
+    command: >
+      python /workspace/vibe-dictate-scripts/openai_asr_server.py
+      --model ${VIBEVOICE_OPENAI_ASR_MODEL:-microsoft/VibeVoice-ASR-HF}
+      --host 0.0.0.0
+      --port 8080
+      --max-new-tokens ${VIBEVOICE_MAX_NEW_TOKENS:-8192}
+    ports:
+      - "${VIBEVOICE_OPENAI_ASR_PORT:-8080}:8080"
+    volumes:
+      - ./scripts:/workspace/vibe-dictate-scripts:ro
+      - vibevoiceHFCache:/root/.cache/huggingface
+      - vibevoicePipCache:/root/.cache/pip
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      TRANSFORMERS_CACHE: /root/.cache/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      TRANSFORMERS_VERBOSITY: error
+      PYTHONUNBUFFERED: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      VIBEVOICE_API_KEY: ${VIBEVOICE_OPENAI_ASR_API_KEY:-}
+    ulimits:
+      memlock: -1
+      stack: -1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
 
 volumes:
   vibevoiceHFCache:
