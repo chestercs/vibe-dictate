@@ -1,0 +1,123 @@
+# ============================================================================
+#  VibeVoice backend — x86_64 fallback stack (NVIDIA RTX / consumer GPUs).
+#
+#  Runtime-install pattern (no docker build):
+#    - Base image: nvcr.io/nvidia/pytorch:25.09-py3  (CUDA 12.x, amd64)
+#    - First start: scripts/vibevoice_entrypoint.sh pip-installs VibeVoice
+#      deps into the container; marker file makes restarts fast.
+#
+#  Layout expected by the mounts below:
+#    vibe-dictate/                      <- compose file lives here
+#      docker-compose-vibevoice.yml
+#      scripts/vibevoice_entrypoint.sh
+#      vibe-voice/                      <- upstream VibeVoice checkout
+#        demo/ vibevoice/ vllm_plugin/ ...
+#
+#  Set VIBEVOICE_SRC in .env to override the upstream location (e.g. if
+#  you keep VibeVoice at a shared path instead of inside vibe-dictate).
+#
+#  Profiles:
+#    docker compose --profile asr up -d       # Gradio ASR on :7860
+#    docker compose --profile realtime up -d  # Realtime TTS on :3001
+# ============================================================================
+
+services:
+
+  vibevoice-asr:
+    image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}
+    container_name: vibevoice-asr
+    profiles: ["asr"]
+    restart: unless-stopped
+    tty: true
+    ipc: host
+    entrypoint: ["/bin/bash", "/workspace/vibe-dictate-scripts/vibevoice_entrypoint.sh"]
+    command: >
+      python demo/vibevoice_asr_gradio_demo.py
+      --model_path ${VIBEVOICE_ASR_MODEL:-microsoft/VibeVoice-ASR}
+      --host 0.0.0.0
+      --port 7860
+      --attn_implementation ${VIBEVOICE_ATTN:-sdpa}
+      --max_new_tokens ${VIBEVOICE_MAX_NEW_TOKENS:-8192}
+    working_dir: /workspace/VibeVoice
+    ports:
+      - "${VIBEVOICE_ASR_PORT:-7860}:7860"
+    volumes:
+      - ${VIBEVOICE_SRC:-./vibe-voice}:/workspace/VibeVoice
+      - ./scripts:/workspace/vibe-dictate-scripts:ro
+      - vibevoiceHFCache:/root/.cache/huggingface
+      - vibevoicePipCache:/root/.cache/pip
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      TRANSFORMERS_CACHE: /root/.cache/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      TRANSFORMERS_VERBOSITY: error
+      GRADIO_SERVER_NAME: 0.0.0.0
+      GRADIO_MCP_SERVER: "True"
+      PYTHONUNBUFFERED: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    ulimits:
+      memlock: -1
+      stack: -1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7860/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+
+  vibevoice-realtime:
+    image: ${VIBEVOICE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}
+    container_name: vibevoice-realtime
+    profiles: ["realtime"]
+    restart: unless-stopped
+    tty: true
+    ipc: host
+    entrypoint: ["/bin/bash", "/workspace/vibe-dictate-scripts/vibevoice_entrypoint.sh"]
+    command: >
+      python demo/vibevoice_realtime_demo.py
+      --model_path ${VIBEVOICE_REALTIME_MODEL:-microsoft/VibeVoice-Realtime-0.5B}
+      --port 3000
+    working_dir: /workspace/VibeVoice
+    ports:
+      - "${VIBEVOICE_REALTIME_PORT:-3001}:3000"
+    volumes:
+      - ${VIBEVOICE_SRC:-./vibe-voice}:/workspace/VibeVoice
+      - ./scripts:/workspace/vibe-dictate-scripts:ro
+      - vibevoiceHFCache:/root/.cache/huggingface
+      - vibevoicePipCache:/root/.cache/pip
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      TRANSFORMERS_CACHE: /root/.cache/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      TRANSFORMERS_VERBOSITY: error
+      PYTHONUNBUFFERED: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    ulimits:
+      memlock: -1
+      stack: -1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 400s
+
+volumes:
+  vibevoiceHFCache:
+  vibevoicePipCache:

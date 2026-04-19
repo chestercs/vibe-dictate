@@ -9,13 +9,22 @@ when starting a new conversation in `tools/vibe-dictate/`.
   VibeVoice ASR (Microsoft's open-source ~7B speech model).
 - **Why**: Hungarian dictation, but works in any of the 50+ languages
   VibeVoice-ASR supports.
-- **Where it lives**: this folder, `tools/vibe-dictate/`, inside a clone
-  of `github.com/microsoft/VibeVoice` (an upstream Microsoft repo we
-  *don't* push to). The vibe-dictate code is mirrored to a separate
-  remote: `git.petyuspolisz.com/chestercs/vibe-dictate.git`, branch
-  `main`. Push there.
-- **Build**: cross-compile via Docker from the parent VibeVoice repo
-  root. No Rust toolchain needed on the host.
+- **Where it lives**: the vibe-dictate git repo lives at
+  `git.petyuspolisz.com/chestercs/vibe-dictate.git` (branch `main`, push
+  there). On Peter's dev box it physically sits at
+  `E:\...\codes\VibeVoice\tools\vibe-dictate\` because historically it
+  was nested inside a Microsoft VibeVoice upstream clone. The **current**
+  layout convention is:
+    - vibe-dictate is the top-level project (repo root).
+    - The upstream VibeVoice checkout goes into a `vibe-voice/`
+      subdirectory (gitignored). `VIBEVOICE_SRC` in `.env` lets a dev box
+      override this to an absolute path (Peter's box uses `../..` because
+      the physical layout is still nested — the compose file lives in
+      `tools/vibe-dictate/` so two dirs up *is* the VibeVoice tree).
+    - Microsoft's VibeVoice has its own `.git` pointing at
+      `github.com/microsoft/VibeVoice`. Never push there.
+- **Build**: cross-compile via Docker from this repo's root. No Rust
+  toolchain needed on the host.
 - **Status**: v0.1 feature-complete (see README "Funkciók" / "Tray menu
   reference"). No automated tests; smoke-test manually in real apps.
 
@@ -26,8 +35,10 @@ when starting a new conversation in `tools/vibe-dictate/`.
   sm_121, 128 GB unified LPDDR5x, CUDA 13) for backend work.
 - **Backend setup**: a Gemma 4 31B vLLM container already runs on the
   GB10, taking ~80 GB. ~20 GB remains for VibeVoice. The GB10 stack
-  (`docker-compose-vibevoice-asr-gb10.yml` etc.) lives in the parent
-  repo's root, untracked.
+  (`docker-compose-vibevoice-asr-gb10.yml`, `Dockerfile.vibevoice-gb10`,
+  `scripts/vibevoice_entrypoint.sh`, `.env.vibevoice-gb10.example`) now
+  lives **in this vibe-dictate repo** (moved from the parent VibeVoice
+  root in v0.2).
 - **Conversation language**: Hungarian. Code and code identifiers in
   English. README is in English; CLAUDE.md is in English.
 - **Communication style**: terse. Don't summarize what the diff already
@@ -40,12 +51,12 @@ when starting a new conversation in `tools/vibe-dictate/`.
 ### Starting a build
 
 ```bash
-# from the parent VibeVoice repo root (one level up):
+# from this repo's root (tools/vibe-dictate/ on Peter's box):
 taskkill //IM vibe-dictate.exe //F 2>/dev/null; true   # release exe lock
 docker compose -f docker-compose-vibedictate-build.yml run --rm vibedictate-build
 ```
 
-Output: `tools/vibe-dictate/target/x86_64-pc-windows-msvc/release/vibe-dictate.exe`.
+Output: `target/x86_64-pc-windows-msvc/release/vibe-dictate.exe`.
 
 The `taskkill` is necessary if the user has the previous build running —
 otherwise the linker hits "Input/output error" trying to overwrite the

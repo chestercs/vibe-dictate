@@ -1,0 +1,49 @@
+# ============================================================================
+#  B-opció: prebuilt image for the GB10 VibeVoice stack.
+#  Faster container restarts (no runtime pip install), in exchange for
+#  the docker compose build step.
+#
+#  Activate by replacing the `image:` line in
+#  docker-compose-vibevoice-asr-gb10.yml with a build block:
+#      build:
+#        context: ${VIBEVOICE_SRC:-./vibe-voice}
+#        dockerfile: ../Dockerfile.vibevoice-gb10
+#      image: vibevoice-gb10:latest
+#  (context = VibeVoice upstream tree; dockerfile path is relative to it.)
+# ============================================================================
+FROM nvcr.io/nvidia/pytorch:25.12-py3
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/root/.cache/huggingface \
+    TRANSFORMERS_CACHE=/root/.cache/huggingface \
+    GRADIO_SERVER_NAME=0.0.0.0 \
+    TORCH_CUDA_ARCH_LIST="12.0+PTX" \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+WORKDIR /workspace/VibeVoice
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg libsndfile1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md LICENSE ./
+COPY vibevoice ./vibevoice
+COPY vllm_plugin ./vllm_plugin
+COPY demo ./demo
+COPY finetuning-asr ./finetuning-asr
+
+RUN pip install --no-deps -e . \
+    && pip install "transformers>=4.51.3,<5.0.0" accelerate diffusers \
+        librosa soundfile pydub ml-collections absl-py gradio \
+        "uvicorn[standard]" fastapi aiortc av llvmlite numba
+
+RUN pip install liger-kernel || echo "liger-kernel optional, skipped"
+
+EXPOSE 7860 3000 8006
+
+CMD ["python", "demo/vibevoice_asr_gradio_demo.py", \
+     "--model_path", "microsoft/VibeVoice-ASR", \
+     "--host", "0.0.0.0", "--port", "7860", \
+     "--attn_implementation", "sdpa"]

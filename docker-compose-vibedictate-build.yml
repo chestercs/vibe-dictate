@@ -1,0 +1,46 @@
+# ============================================================================
+#  Docker-based cross-compile pipeline for vibe-dictate's Windows .exe.
+#  No Rust toolchain needed on the host — a build-image (rust:1.89 +
+#  cargo-xwin) carries the whole chain.
+#
+#  First run: build (~3-5 min, cargo-xwin install + xwin MSVC headers).
+#  Subsequent runs: Rust compile only (~30 sec - 2 min incremental).
+#
+#  Usage (from this directory):
+#    docker compose -f docker-compose-vibedictate-build.yml run --rm vibedictate-build
+#
+#  Output:
+#    target/x86_64-pc-windows-msvc/release/vibe-dictate.exe
+#
+#  Caches:
+#    - cargo registry + git DB -> vibedictateCargoCache volume
+#    - xwin-downloaded MSVC headers -> vibedictateXwinCache volume
+#    - target/ -> host ./target/ (incremental build)
+# ============================================================================
+
+services:
+
+  vibedictate-build:
+    build:
+      context: .
+      dockerfile: Dockerfile.build
+    image: vibedictate-build:latest
+    container_name: vibedictate-build
+    working_dir: /io
+    environment:
+      XWIN_ACCEPT_LICENSE: "1"
+      CARGO_HOME: /cargo
+      XDG_CACHE_HOME: /xwincache
+      CARGO_INCREMENTAL: "1"
+    volumes:
+      - ./:/io
+      - vibedictateCargoCache:/cargo
+      - vibedictateXwinCache:/xwincache
+    command: >
+      cargo xwin build --release --target x86_64-pc-windows-msvc
+
+volumes:
+  vibedictateCargoCache:
+    name: vibedictateCargoCache
+  vibedictateXwinCache:
+    name: vibedictateXwinCache

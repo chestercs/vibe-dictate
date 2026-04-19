@@ -101,31 +101,64 @@ LoRA fine-tuning via the upstream `finetuning-asr/` recipes.
 ## Hosting the VibeVoice backend
 
 vibe-dictate doesn't bundle the ASR server — you point it at a Gradio
-endpoint someone (you, your team, Azure Foundry, etc.) runs.
+endpoint someone (you, your team, Azure Foundry, etc.) runs. The compose
+files needed to stand one up live in this repo; the upstream VibeVoice
+source itself isn't vendored and has to be cloned separately.
+
+### Expected repo layout
+
+```
+vibe-dictate/                        <- this repo
+  docker-compose-vibevoice.yml       <- x86_64 / consumer NVIDIA backend
+  docker-compose-vibevoice-asr-gb10.yml  <- GB10 DGX Spark backend
+  docker-compose-vibedictate-build.yml   <- Rust cross-compile pipeline
+  Dockerfile.build                   <- builder image for the .exe
+  Dockerfile.vibevoice-gb10          <- B-opció (prebuilt) GB10 image
+  scripts/vibevoice_entrypoint.sh    <- runtime pip-install on first boot
+  .env.vibevoice.example             <- copy to .env for x86_64
+  .env.vibevoice-gb10.example        <- copy to .env for GB10
+  src/                               <- Rust client source
+  vibe-voice/                        <- upstream microsoft/VibeVoice (gitignored)
+    demo/ vibevoice/ vllm_plugin/ ...
+```
+
+Clone the upstream repo into `vibe-voice/`:
+
+```bash
+git clone https://github.com/microsoft/VibeVoice vibe-voice
+```
+
+Override the default via `VIBEVOICE_SRC=/abs/path` in your `.env` if you
+keep the upstream tree elsewhere (shared disk, legacy layout, etc.).
 
 ### Option A — local Docker (RTX 4090 / dev workstation)
 
-The upstream VibeVoice repo (this repo's parent directory) includes a
-`docker-compose.yml` + `Dockerfile` for an x86_64 / CUDA 12 setup:
-
 ```bash
-# from the parent VibeVoice repo root
-docker compose up -d vibevoice-asr
+cp .env.vibevoice.example .env
+# edit HUGGING_FACE_HUB_TOKEN if you have one
+docker compose -f docker-compose-vibevoice.yml --profile asr up -d
 # Gradio UI on http://localhost:7860
 ```
 
-First boot downloads the ~14 GB model from HuggingFace; set
-`HUGGING_FACE_HUB_TOKEN` in a `.env` to avoid anon rate limits.
+First boot downloads the ~14 GB model from HuggingFace; a token avoids
+the anon rate limit. The runtime-install entrypoint runs once per
+container lifetime (marker file at `/root/.vibevoice_installed`) —
+subsequent restarts skip pip entirely.
 
 ### Option B — NVIDIA GB10 DGX Spark (aarch64, sm_121)
 
-For Grace Blackwell unified-memory machines the parent repo also has
-`docker-compose-vibevoice-asr-gb10.yml` plus
-`scripts/vibevoice_entrypoint.sh`. It runs on `nvcr.io/nvidia/pytorch:25.12-py3`
-(no custom build step) and coexists with other GPU workloads (e.g. a
-Gemma vLLM container) within the 128 GB unified pool. Copy
-`.env.vibevoice-gb10.example` → `.env`, edit `VIBEVOICE_BASE_DIR`, then
-`docker compose up -d`.
+For Grace Blackwell unified-memory machines:
+
+```bash
+cp .env.vibevoice-gb10.example .env
+# edit VIBEVOICE_BASE_DIR (USB mount on GB10) + token
+docker compose up -d    # COMPOSE_FILE is set in .env
+```
+
+Runs on `nvcr.io/nvidia/pytorch:25.12-py3` (CUDA 13, aarch64) and coexists
+with other GPU workloads (e.g. a Gemma vLLM container) within the 128 GB
+unified pool. Default `up -d` brings both the ASR service (port 7860)
+and the 0.5B realtime TTS (port 3000); combined VRAM is ~18 GB.
 
 ### Option C — managed cloud
 
@@ -154,13 +187,13 @@ There's no toolchain install required on the host — a Docker-based
 cross-compile pipeline produces the Windows .exe from any Linux/macOS/
 Windows machine that has Docker.
 
-From the **parent VibeVoice repo root** (one level above this directory):
+From this repo's root:
 
 ```bash
 docker compose -f docker-compose-vibedictate-build.yml run --rm vibedictate-build
 ```
 
-Output: `tools/vibe-dictate/target/x86_64-pc-windows-msvc/release/vibe-dictate.exe`
+Output: `target/x86_64-pc-windows-msvc/release/vibe-dictate.exe`
 
 - First build: ~5–10 min (cargo-xwin downloads MSVC headers + cold compile)
 - Incremental: ~10–30 sec (cargo cache + xwin cache live in named volumes)

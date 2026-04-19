@@ -1,3 +1,10 @@
 /target
 Cargo.lock
 *.log
+
+# Upstream VibeVoice checkout — not our code, user clones it alongside.
+# See README "Backend setup" for how to populate this folder.
+/vibe-voice/
+
+# Per-host overrides for docker compose
+.env

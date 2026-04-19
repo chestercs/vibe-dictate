@@ -1,7 +1,7 @@
 # =============================================================================
-#  Cross-compile builder image a vibe-dictate Windows EXE-jéhez.
-#  rust:1.84-bookworm + cargo-xwin + clang + lld → x86_64-pc-windows-msvc.
-#  A docker-compose-vibedictate-build.yml használja.
+#  Cross-compile builder image for vibe-dictate's Windows .exe.
+#  rust:1.89-bookworm + cargo-xwin + clang + lld → x86_64-pc-windows-msvc.
+#  Used by docker-compose-vibedictate-build.yml.
 # =============================================================================
 FROM rust:1.89-bookworm
 
@@ -17,6 +17,6 @@ RUN apt-get update \
 RUN rustup target add x86_64-pc-windows-msvc \
     && cargo install --locked --root /usr/local cargo-xwin@0.18.6
 
-WORKDIR /io/tools/vibe-dictate
+WORKDIR /io
 
 CMD ["cargo", "xwin", "build", "--release", "--target", "x86_64-pc-windows-msvc"]
