@@ -77,6 +77,8 @@ def transcribe(
     language: Optional[str],
     prompt: Optional[str],
     max_new_tokens: int,
+    num_beams: int,
+    repetition_penalty: float,
 ):
     kwargs = {"audio": audio_path}
     combined_prompt = build_prompt(language, prompt)
@@ -85,9 +87,23 @@ def transcribe(
     inputs = processor.apply_transcription_request(**kwargs).to(asr_model.device, asr_model.dtype)
 
     prompt_len = inputs["input_ids"].shape[1]
+    # Beam search ≥ 2 noticeably cuts WER vs. greedy on short Hungarian
+    # utterances; repetition_penalty > 1 keeps VibeVoice from looping
+    # the same phrase when it's not sure what it heard. Sampling stays
+    # off (do_sample=False) — dictation wants deterministic output.
+    gen_kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "do_sample": False,
+        "num_beams": num_beams,
+    }
+    if num_beams > 1:
+        # early_stopping only meaningful with beam search.
+        gen_kwargs["early_stopping"] = True
+    if repetition_penalty and repetition_penalty != 1.0:
+        gen_kwargs["repetition_penalty"] = repetition_penalty
     t0 = time.perf_counter()
     with torch.inference_mode():
-        output_ids = asr_model.generate(**inputs, max_new_tokens=max_new_tokens)
+        output_ids = asr_model.generate(**inputs, **gen_kwargs)
     elapsed = time.perf_counter() - t0
 
     generated_ids = output_ids[:, prompt_len:]
@@ -145,7 +161,15 @@ def format_vtt(segments: list) -> str:
     return "\n".join(lines)
 
 
-def build_app(processor, asr_model, model_id: str, api_key: Optional[str], max_new_tokens: int) -> FastAPI:
+def build_app(
+    processor,
+    asr_model,
+    model_id: str,
+    api_key: Optional[str],
+    max_new_tokens: int,
+    num_beams: int,
+    repetition_penalty: float,
+) -> FastAPI:
     app = FastAPI(title="VibeVoice OpenAI-compat ASR")
 
     def check_auth(authorization: Optional[str]):
@@ -204,6 +228,8 @@ def build_app(processor, asr_model, model_id: str, api_key: Optional[str], max_n
                 language=language,
                 prompt=prompt,
                 max_new_tokens=max_new_tokens,
+                num_beams=num_beams,
+                repetition_penalty=repetition_penalty,
             )
         finally:
             try:
@@ -256,6 +282,16 @@ def main():
         type=int,
         default=int(os.getenv("VIBEVOICE_MAX_NEW_TOKENS", "8192")),
     )
+    parser.add_argument(
+        "--num-beams",
+        type=int,
+        default=int(os.getenv("VIBEVOICE_NUM_BEAMS", "5")),
+    )
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=float(os.getenv("VIBEVOICE_REPETITION_PENALTY", "1.15")),
+    )
     parser.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "info"))
     args = parser.parse_args()
 
@@ -268,7 +304,19 @@ def main():
     processor, asr_model = load_model(args.model, args.dtype)
     LOG.info("model on %s (dtype=%s)", asr_model.device, asr_model.dtype)
 
-    app = build_app(processor, asr_model, args.model, args.api_key, args.max_new_tokens)
+    LOG.info(
+        "generation defaults: num_beams=%d repetition_penalty=%.2f max_new_tokens=%d",
+        args.num_beams, args.repetition_penalty, args.max_new_tokens,
+    )
+    app = build_app(
+        processor,
+        asr_model,
+        args.model,
+        args.api_key,
+        args.max_new_tokens,
+        args.num_beams,
+        args.repetition_penalty,
+    )
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
 
 
