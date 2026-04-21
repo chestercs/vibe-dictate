@@ -57,6 +57,7 @@ mod config;
 mod openai;
 mod hotkey_capture;
 mod injector;
+mod keystroke;
 mod mouse_hook;
 mod singleton;
 mod text_input;
@@ -175,15 +176,22 @@ fn main() -> Result<()> {
     // session is torn down.
     let vad_speech_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
-    // Apply the configured input mode on startup.
+    // Apply the configured input mode on startup — but only if the app
+    // is enabled. Starting up disabled means the hotkey stays free for
+    // other apps and the mic isn't opened until the user opts in from
+    // the tray.
     {
         let snapshot = cfg.lock().unwrap().clone();
-        apply_input_mode(
-            &snapshot,
-            &mut binding_manager,
-            &mut vad_session,
-            &vad_speech_active,
-        );
+        if snapshot.enabled {
+            apply_input_mode(
+                &snapshot,
+                &mut binding_manager,
+                &mut vad_session,
+                &vad_speech_active,
+            );
+        } else {
+            log::info!("Startup: app is disabled — hotkey + VAD not engaged");
+        }
     }
 
     // Recording state
@@ -360,18 +368,24 @@ fn main() -> Result<()> {
                     && !vad_speaking
                     && in_flight_loop.load(Ordering::SeqCst);
                 let disconnected = !connection_ok_loop.load(Ordering::SeqCst);
-                let vad_mode_active = {
+                let (enabled, vad_mode_active) = {
                     let c = cfg_loop.lock().unwrap();
-                    c.input.mode == InputMode::VoiceActivation
+                    (c.enabled, c.input.mode == InputMode::VoiceActivation)
                 };
 
                 // If a cancel is still pending on an in-flight transcription,
                 // keep the red flash instead of briefly flipping to yellow
                 // "Processing" between flash expiry and the HTTP response.
+                // Disabled sits between flashes and recording: flashes
+                // from a just-toggled-off moment still render, but otherwise
+                // Disabled trumps every normal state — no point showing
+                // "Disconnected" when the app isn't going to dictate anyway.
                 let desired = if flash_error {
                     tray::TrayStatus::ErrorFlash
                 } else if flash_cancel || (cancel_pending && processing) {
                     tray::TrayStatus::CancelFlash
+                } else if !enabled {
+                    tray::TrayStatus::Disabled
                 } else if recording || vad_speaking {
                     tray::TrayStatus::Recording
                 } else if processing {
@@ -690,24 +704,54 @@ fn main() -> Result<()> {
                 while let Ok(me) = MenuEvent::receiver().try_recv() {
                     match tray::handle_menu_event(&me, &cfg_loop) {
                         Ok(outcome) => {
-                            if outcome.input_mode_changed {
+                            // When the master enable toggle flips, engage
+                            // or tear down the full input path. Same
+                            // branch handles both the on→off and off→on
+                            // transitions — apply_input_mode rebuilds the
+                            // active side and clears the other.
+                            if outcome.enabled_changed {
                                 let snapshot = cfg_loop.lock().unwrap().clone();
-                                apply_input_mode(
-                                    &snapshot,
-                                    &mut binding_manager,
-                                    &mut vad_session,
-                                    &vad_speech_active_loop,
-                                );
+                                if snapshot.enabled {
+                                    apply_input_mode(
+                                        &snapshot,
+                                        &mut binding_manager,
+                                        &mut vad_session,
+                                        &vad_speech_active_loop,
+                                    );
+                                } else {
+                                    binding_manager.disable();
+                                    if let Some(s) = vad_session.take() {
+                                        s.stop();
+                                    }
+                                    vad_speech_active_loop
+                                        .store(false, Ordering::SeqCst);
+                                    log::info!("Disabled: input path torn down");
+                                }
+                            } else if outcome.input_mode_changed {
+                                let snapshot = cfg_loop.lock().unwrap().clone();
+                                if snapshot.enabled {
+                                    apply_input_mode(
+                                        &snapshot,
+                                        &mut binding_manager,
+                                        &mut vad_session,
+                                        &vad_speech_active_loop,
+                                    );
+                                }
                             }
                             if outcome.hotkey_changed {
                                 // Both modes use the binding now (PTT as the
                                 // talk key, VAD as a cancel-in-flight hotkey),
-                                // so always re-register on a binding change.
+                                // so always re-register on a binding change —
+                                // but only while enabled; an off-state rebind
+                                // is purely a config edit and the binding
+                                // should still stay unregistered.
                                 let snapshot = cfg_loop.lock().unwrap().clone();
-                                if let Err(e) =
-                                    binding_manager.apply(&snapshot.hotkey.binding)
-                                {
-                                    log::error!("apply new binding failed: {e:#}");
+                                if snapshot.enabled {
+                                    if let Err(e) =
+                                        binding_manager.apply(&snapshot.hotkey.binding)
+                                    {
+                                        log::error!("apply new binding failed: {e:#}");
+                                    }
                                 }
                             }
                             if outcome.request_capture {
@@ -763,14 +807,27 @@ fn main() -> Result<()> {
                 // and Disconnected means the worker panicked / exited without
                 // sending — treat that as cancel + restore.
                 if let Some(pending) = pending_capture.as_ref() {
+                    // Capture opened → the binding is already disabled
+                    // while the modal is up. Re-apply only when the app
+                    // is actually enabled, so a rebind during Disabled
+                    // state silently updates the config without grabbing
+                    // the hotkey from other apps.
+                    let enabled_now = cfg_loop.lock().unwrap().enabled;
                     match pending.handle.rx.try_recv() {
                         Ok(Ok(Some(new_binding))) => {
                             log::info!("Hotkey capture returned: {}", new_binding);
-                            if let Err(e) = binding_manager.apply(&new_binding) {
+                            let apply_res = if enabled_now {
+                                binding_manager.apply(&new_binding)
+                            } else {
+                                Ok(())
+                            };
+                            if let Err(e) = apply_res {
                                 log::error!("apply captured binding failed: {e:#}");
                                 // Fall back to previous so the app isn't left silent.
-                                if let Err(e2) = binding_manager.apply(&pending.previous) {
-                                    log::error!("restore previous binding failed: {e2:#}");
+                                if enabled_now {
+                                    if let Err(e2) = binding_manager.apply(&pending.previous) {
+                                        log::error!("restore previous binding failed: {e2:#}");
+                                    }
                                 }
                             } else {
                                 let save_res = {
@@ -790,15 +847,19 @@ fn main() -> Result<()> {
                         }
                         Ok(Ok(None)) => {
                             log::info!("Hotkey capture cancelled, restoring previous binding");
-                            if let Err(e) = binding_manager.apply(&pending.previous) {
-                                log::error!("restore previous binding failed: {e:#}");
+                            if enabled_now {
+                                if let Err(e) = binding_manager.apply(&pending.previous) {
+                                    log::error!("restore previous binding failed: {e:#}");
+                                }
                             }
                             pending_capture = None;
                         }
                         Ok(Err(e)) => {
                             log::error!("Hotkey capture errored: {e:#}");
-                            if let Err(e2) = binding_manager.apply(&pending.previous) {
-                                log::error!("restore previous binding failed: {e2:#}");
+                            if enabled_now {
+                                if let Err(e2) = binding_manager.apply(&pending.previous) {
+                                    log::error!("restore previous binding failed: {e2:#}");
+                                }
                             }
                             pending_capture = None;
                         }
@@ -807,8 +868,10 @@ fn main() -> Result<()> {
                             log::error!(
                                 "Hotkey capture worker disconnected without sending a result"
                             );
-                            if let Err(e) = binding_manager.apply(&pending.previous) {
-                                log::error!("restore previous binding failed: {e:#}");
+                            if enabled_now {
+                                if let Err(e) = binding_manager.apply(&pending.previous) {
+                                    log::error!("restore previous binding failed: {e:#}");
+                                }
                             }
                             pending_capture = None;
                         }
@@ -1054,18 +1117,45 @@ fn send_and_inject(
         return Ok(());
     }
 
-    let mut out = text.trim().to_string();
-    if out.is_empty() {
+    let raw = text.trim().to_string();
+    if raw.is_empty() {
         log::warn!("Empty transcription returned");
         return Ok(());
     }
-    // Filter out single non-speech meta tags like "[Music]", "[Noise]", "[Silence]".
-    // VibeVoice ASR emits these when no speech is detected — pasting them into
-    // the focused window is never what the user wants.
-    if is_meta_only(&out) {
-        log::warn!("Non-speech transcription '{}', skipping paste", out);
+    // Strip VibeVoice's non-speech meta tags ("[Music]", "[Noise]",
+    // "[Environmental noise]", "[Unintelligible speech]", …) wherever they
+    // appear — not just when the entire response is a single tag.
+    let stripped = strip_bracket_tags(&raw);
+    if stripped.is_empty() {
+        log::warn!("Non-speech transcription '{}', skipping paste", raw);
         return Ok(());
     }
+    if stripped != raw {
+        log::info!("Stripped bracket tags: '{}' → '{}'", raw, stripped);
+    }
+
+    // Interactive keystroke path: if the user said only a parseable
+    // combo ("escape", "control shift s"), inject the keystroke instead
+    // of pasting the text. Falls through to normal text output on any
+    // parse failure, so dictation of actual prose is never hijacked.
+    if output_cfg.interactive_keystrokes {
+        if let Some(combo) = keystroke::parse_speech_keystroke(&stripped) {
+            log::info!(
+                "Interactive keystroke: '{}' → ctrl={} shift={} alt={} win={} vk=0x{:02X}",
+                stripped,
+                combo.mods.ctrl,
+                combo.mods.shift,
+                combo.mods.alt,
+                combo.mods.win,
+                combo.vk.0,
+            );
+            keystroke::send_combo(combo)?;
+            *last_error_note.lock().unwrap() = None;
+            return Ok(());
+        }
+    }
+
+    let mut out = stripped;
     if output_cfg.trailing_space {
         out.push(' ');
     }
@@ -1122,19 +1212,45 @@ fn expire_instant(cell: &Arc<Mutex<Option<Instant>>>, now: Instant) -> bool {
     }
 }
 
-/// VibeVoice ASR returns bracketed meta tags ("[Music]", "[Noise]",
-/// "[Silence]", "[Unintelligible Speech]") when no actual speech is detected.
-/// Pasting them into the focused window is never useful — drop them silently.
-fn is_meta_only(text: &str) -> bool {
-    let t = text.trim();
-    let inner = match (t.strip_prefix('['), t.strip_suffix(']')) {
-        (Some(_), Some(_)) if t.len() >= 2 => &t[1..t.len() - 1],
-        _ => return false,
-    };
-    !inner.is_empty()
-        && inner
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ' ')
+/// Strip every `[...]` bracketed section from `text`, collapsing any
+/// runs of whitespace left behind. VibeVoice ASR emits tags like
+/// "[Music]", "[Noise]", "[Silence]", "[Environmental noise]",
+/// "[Unintelligible speech]" — including mid-utterance — whenever a
+/// stretch of audio doesn't map to clean speech. The old "whole string
+/// is exactly one tag" check missed inline tags and tags containing
+/// punctuation (commas, em-dashes), so switch to a generic strip.
+///
+/// Nested brackets are tolerated: depth counter survives a mismatched
+/// closing bracket. We preserve the characters outside any tag verbatim
+/// — only the bracketed content (and the brackets themselves) is dropped.
+fn strip_bracket_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth: u32 = 0;
+    for c in text.chars() {
+        match c {
+            '[' => depth = depth.saturating_add(1),
+            ']' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    // Collapse whitespace — stripping "[Music] hello" → " hello" left an
+    // awkward leading space; this normalizes it cheaply without pulling
+    // in a regex crate.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut prev_ws = true;
+    for c in out.chars() {
+        if c.is_whitespace() {
+            if !prev_ws {
+                collapsed.push(' ');
+            }
+            prev_ws = true;
+        } else {
+            collapsed.push(c);
+            prev_ws = false;
+        }
+    }
+    collapsed.trim().to_string()
 }
 
 fn init_logger() {

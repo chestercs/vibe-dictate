@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Global on/off switch. When false, no hotkey is registered and no
+    /// VAD session runs — the app is inert but the tray stays around so
+    /// the user can toggle it back on. Defaults to false so a fresh
+    /// install doesn't immediately start grabbing a hotkey: the user
+    /// opts in from the tray when they actually want to dictate.
+    #[serde(default)]
+    pub enabled: bool,
     /// `[server]` in TOML. Older configs used `[gradio]` with fields
     /// `url` / `api_token`; the serde aliases on ServerConfig let those
     /// load transparently and get rewritten on the next save.
@@ -253,15 +260,23 @@ pub struct OutputConfig {
     pub send_key_delay_ms: u64,
     /// Milliseconds to hold each key "down" before releasing (down→up gap
     /// per character). 0 works against some targets but several apps filter
-    /// out zero-duration keypresses, so 10 ms is the default — still
+    /// out zero-duration keypresses, so 15 ms is the default — still
     /// imperceptible but reliable. Raise further only if characters still
     /// drop after bumping the inter-char delay.
     #[serde(default = "default_send_key_down_delay_ms")]
     pub send_key_down_delay_ms: u64,
+    /// "Interactive" mode: if the transcription parses cleanly as a single
+    /// key combo ("escape", "control shift s"), press that combo via
+    /// SendInput instead of pasting the text. Anything not parseable as
+    /// a combo falls through to the normal text injection, so this is
+    /// additive and safe to leave on.
+    #[serde(default = "default_interactive_keystrokes")]
+    pub interactive_keystrokes: bool,
 }
 
-fn default_send_key_delay_ms() -> u64 { 20 }
-fn default_send_key_down_delay_ms() -> u64 { 10 }
+fn default_send_key_delay_ms() -> u64 { 30 }
+fn default_send_key_down_delay_ms() -> u64 { 15 }
+fn default_interactive_keystrokes() -> bool { true }
 
 impl Default for OutputConfig {
     fn default() -> Self {
@@ -271,6 +286,7 @@ impl Default for OutputConfig {
             send_enter: false,
             send_key_delay_ms: default_send_key_delay_ms(),
             send_key_down_delay_ms: default_send_key_down_delay_ms(),
+            interactive_keystrokes: default_interactive_keystrokes(),
         }
     }
 }
@@ -300,6 +316,7 @@ impl Default for StartupConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            enabled: false,
             server: ServerConfig::default(),
             stt: SttConfig::default(),
             audio: AudioConfig::default(),

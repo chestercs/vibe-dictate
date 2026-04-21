@@ -28,7 +28,13 @@ pub fn clipboard_paste(text: &str) -> Result<()> {
 /// terminals, Notepad on slower machines — can't drain their message
 /// queue fast enough and silently drop characters. Pacing via
 /// `key_delay_ms` (sleep between chars) and `key_down_delay_ms` (hold
-/// duration for each key) fixes this; defaults are 5 / 0.
+/// duration for each key) fixes this.
+///
+/// Spaces are the single most-dropped character in observed failures —
+/// they don't visibly render so the user sees "foobar" instead of "foo
+/// bar" and assumes a single glitch rather than a pattern. We sleep an
+/// extra `key_delay_ms` after every U+0020 as a cheap insurance policy;
+/// the added latency is imperceptible but dropped spaces are painful.
 pub fn send_input_text(text: &str, key_delay_ms: u64, key_down_delay_ms: u64) -> Result<()> {
     let cbsize = std::mem::size_of::<INPUT>() as i32;
     let mut total_events: usize = 0;
@@ -69,8 +75,17 @@ pub fn send_input_text(text: &str, key_delay_ms: u64, key_down_delay_ms: u64) ->
             break;
         }
 
-        if key_delay_ms > 0 {
-            thread::sleep(Duration::from_millis(key_delay_ms));
+        // Pace between characters. Spaces get an extra dose because
+        // they're the character apps are most likely to drop silently —
+        // see the docstring on why "foobar" vs "foo bar" is why this
+        // branch exists.
+        let post_char_delay = if ch == 0x0020 {
+            key_delay_ms.saturating_mul(2)
+        } else {
+            key_delay_ms
+        };
+        if post_char_delay > 0 {
+            thread::sleep(Duration::from_millis(post_char_delay));
         }
     }
 

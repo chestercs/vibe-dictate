@@ -14,10 +14,12 @@ use crate::config::{Config, InputMode, OutputMode, HOTKEY_OPTIONS};
 // keep the menu rebuildable without storing every MenuItem handle in shared state.
 const ID_QUIT: &str = "vd:quit";
 const ID_RELOAD: &str = "vd:reload";
+const ID_ENABLED: &str = "vd:enabled";
 const ID_AUTOSTART: &str = "vd:autostart";
 const ID_OUT_CLIPBOARD: &str = "vd:out:clipboard";
 const ID_OUT_SENDINPUT: &str = "vd:out:sendinput";
 const ID_OUT_SEND_ENTER: &str = "vd:out:send_enter";
+const ID_OUT_INTERACTIVE: &str = "vd:out:interactive";
 const PREFIX_SEND_DELAY: &str = "vd:out:keydelay:";
 const PREFIX_SEND_HOLD: &str = "vd:out:keyhold:";
 const ID_OPEN_LOG: &str = "vd:open:log";
@@ -128,6 +130,10 @@ pub enum TrayStatus {
     Processing,
     /// Heartbeat / last request failed with a connection issue (gray).
     Disconnected,
+    /// Global enable toggle is off — the app is inert but still resident
+    /// in the tray. Dark/muted color so the user can tell at a glance
+    /// that dictation won't fire even if they press the hotkey.
+    Disabled,
     /// Brief red overlay after a double-tap cancel.
     CancelFlash,
     /// Brief red overlay after a transcription error.
@@ -165,6 +171,10 @@ pub fn apply_status(
             indicator_icon(140, 140, 140)?,
             format!("vibe-dictate — offline (hotkey: {})", binding),
         ),
+        TrayStatus::Disabled => (
+            indicator_icon(70, 70, 78)?,
+            "vibe-dictate — disabled (click tray → Enabled to turn on)".to_string(),
+        ),
         TrayStatus::CancelFlash => (
             indicator_icon(220, 50, 50)?,
             "vibe-dictate — cancelled".to_string(),
@@ -199,6 +209,25 @@ pub fn build(cfg: &Config) -> Result<TrayState> {
 
 fn build_menu(cfg: &Config) -> Result<Menu> {
     let menu = Menu::new();
+
+    // Master enable toggle — sits at the very top so it's the first
+    // thing users reach for. When off, the rest of the menu still
+    // works (user can reconfigure before re-enabling) but the hotkey
+    // is unregistered and the VAD worker is torn down.
+    let enabled_label = if cfg.enabled {
+        "Enabled  (click to disable)"
+    } else {
+        "Disabled  (click to enable)"
+    };
+    let enabled_item = CheckMenuItem::with_id(
+        MenuId::new(ID_ENABLED),
+        enabled_label,
+        true,
+        cfg.enabled,
+        None,
+    );
+    menu.append(&enabled_item)?;
+    menu.append(&PredefinedMenuItem::separator())?;
 
     let reload = MenuItem::with_id(MenuId::new(ID_RELOAD), "Reload config", true, None);
     menu.append(&reload)?;
@@ -511,6 +540,20 @@ fn build_menu(cfg: &Config) -> Result<Menu> {
     );
     menu.append(&send_enter)?;
 
+    // Interactive-keystroke toggle: when on, a transcription that
+    // parses as a single key combo ("escape", "control shift s") is
+    // sent as the actual keystroke instead of pasted as text. Leaves
+    // normal prose untouched — anything non-parseable falls through
+    // to the regular text injection path.
+    let interactive = CheckMenuItem::with_id(
+        MenuId::new(ID_OUT_INTERACTIVE),
+        "Interactive keystrokes (speak a combo to press it)",
+        true,
+        cfg.output.interactive_keystrokes,
+        None,
+    );
+    menu.append(&interactive)?;
+
     menu.append(&PredefinedMenuItem::separator())?;
 
     let open_log = MenuItem::with_id(MenuId::new(ID_OPEN_LOG), "Open log file", true, None);
@@ -567,6 +610,9 @@ pub struct MenuOutcome {
     /// down the current input path and bring up the other — the two are
     /// mutually exclusive, so the routing is all-or-nothing.
     pub input_mode_changed: bool,
+    /// Set when the user flipped the master Enabled toggle. Main has to
+    /// engage or tear down the input path accordingly.
+    pub enabled_changed: bool,
 }
 
 pub fn handle_menu_event(
@@ -582,6 +628,24 @@ pub fn handle_menu_event(
         log::info!("Config reloaded from disk");
         outcome.hotkey_changed = true;
         outcome.input_mode_changed = true;
+        outcome.enabled_changed = true;
+        outcome.menu_dirty = true;
+    } else if id == ID_ENABLED {
+        let new_val = !cfg.lock().unwrap().enabled;
+        {
+            let mut c = cfg.lock().unwrap();
+            c.enabled = new_val;
+            c.save()?;
+        }
+        log::info!("Enabled set to {}", new_val);
+        outcome.enabled_changed = true;
+        outcome.menu_dirty = true;
+    } else if id == ID_OUT_INTERACTIVE {
+        let mut c = cfg.lock().unwrap();
+        c.output.interactive_keystrokes = !c.output.interactive_keystrokes;
+        let new_val = c.output.interactive_keystrokes;
+        c.save()?;
+        log::info!("Interactive keystrokes set to {}", new_val);
         outcome.menu_dirty = true;
     } else if id == ID_AUTOSTART {
         let new_val = !cfg.lock().unwrap().startup.autostart;
